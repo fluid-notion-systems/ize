@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "claris-fuse",
+    "claris-fuse-lib",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Claris Team"]
+description = "A FUSE filesystem with version control capabilities"
+repository = "https://github.com/claris/claris-fuse"
+license = "MIT"

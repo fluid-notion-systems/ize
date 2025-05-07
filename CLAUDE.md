@@ -108,14 +108,33 @@ The asynchronous approach ensures:
 - System can handle high-volume changes without performance degradation
 - Queue can be persisted to handle restarts/crashes
 
-## Next Steps
-1. Initialize Rust workspace
-2. Add fuser dependency
-3. Implement basic passthrough filesystem
-4. Design version history storage schema 
-5. Implement storage trait interface
-6. Create SQLite storage backend
-7. Add versioning layer for core operations
-8. Implement async background processing system for LLM descriptions
-9. Integrate LLM API for change descriptions
-10. Create CLI tools for browsing and restoring history
+## Development Phases and Branching Strategy
+
+Each phase of development will use a dedicated feature branch, with periodic merges to main after completing significant milestones. Each development step should have at least one dedicated commit with a clear, descriptive commit message.
+
+### Phase 1: Foundation (`feature/foundation`)
+1. Initialize Rust workspace (commit)
+2. Add fuser dependency (commit)
+3. Implement basic passthrough filesystem (1+ commits)
+4. Design version history storage schema (commit)
+5. Implement storage trait interface (commit)
+
+### Phase 2: Core Functionality (`feature/core-versioning`)
+1. Create SQLite storage backend (1+ commits)
+2. Add versioning layer for core operations (multiple commits, one per operation type)
+3. Create CLI tools for browsing and restoring history (1+ commits)
+4. Write comprehensive tests (multiple commits, organized by component)
+
+### Phase 3: Advanced Features (`feature/llm-integration`)
+1. Implement async background processing system for LLM descriptions (1+ commits)
+2. Integrate LLM API for change descriptions (1+ commits)
+3. Add search capabilities across descriptions (commit)
+4. Implement configurable retention policies (commit)
+
+## Commit Guidelines
+
+- Make atomic commits that focus on a single logical change
+- Write descriptive commit messages explaining the "why" not just the "what"
+- Include references to any research or decisions made
+- Keep commits small and focused to make code review easier
+- For large features, break them down into multiple sequential commits
