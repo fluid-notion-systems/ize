@@ -41,17 +41,25 @@ Claris-FUSE is a FUSE filesystem implementation in Rust that maintains a linear 
 
 ## Usage Examples (Planned)
 ```bash
-# Mount the filesystem
-claris-fuse mount /path/to/source /mount/point
+# Initialize a directory for version control (creates claris-fuse.db)
+claris-fuse init /path/to/directory
+
+# Mount the filesystem (mounts only if claris-fuse.db exists)
+# The directory specified is the mount point
+claris-fuse mount /path/to/mount/point
+# If no directory is specified, uses the current directory
+claris-fuse mount
 
 # View version history of a file
-claris-fuse history /mount/point/file.txt
+claris-fuse history /path/to/file.txt
 
 # Restore a file to a previous version
-claris-fuse restore /mount/point/file.txt --version=3
+claris-fuse restore /path/to/file.txt --version=3
 ```
 
 The version history database `claris-fuse.db` will be stored in the source directory that is being mounted, allowing the version history to persist between different mount sessions. This database file will be visible in the source directory when it's not mounted, but will be hidden from view when the filesystem is mounted (i.e., it won't be visible in the mount point).
+
+The `mount` command will only accept the directory name to mount (or use the current directory if none is specified), and it will only mount the directory if there is a `claris-fuse.db` file present in that directory. The specified directory will serve as the mount point itself.
 
 ## Development Status
 - Initial research phase
