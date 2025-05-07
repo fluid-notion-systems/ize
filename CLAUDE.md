@@ -61,6 +61,17 @@ The version history database `claris-fuse.db` will be stored in the source direc
 
 The `mount` command will only accept the directory name to mount (or use the current directory if none is specified), and it will only mount the directory if there is a `claris-fuse.db` file present in that directory. The specified directory will serve as the mount point itself.
 
+### Implementation Note on Database Access
+
+The FUSE driver will be able to write to the "hidden" `claris-fuse.db` file in the following way:
+
+1. When the FUSE driver intercepts filesystem operations, it will record changes to the database
+2. For `readdir` operations (listing directory contents), the driver will filter out the database file from results
+3. The driver will maintain two different views:
+   - The virtualized view presented to users (without the .db file)
+   - Direct access to the underlying filesystem where it can read/write the .db file
+4. Since the driver knows the real path of the source directory, it can directly access the database file while keeping it hidden from the mounted view
+
 ## Development Status
 - Initial research phase
 - Selected fuser crate over fuse-rs
