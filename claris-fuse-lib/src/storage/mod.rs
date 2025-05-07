@@ -1,1 +1,6 @@
-// Storage traits and implementation will be added later
+mod traits;
+
+pub use traits::{
+    FileVersion, OperationType, StorageError, StorageFactory, StorageResult, VersionStorage,
+    VersionedFile,
+};
