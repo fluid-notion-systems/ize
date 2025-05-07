@@ -51,7 +51,7 @@ claris-fuse history /mount/point/file.txt
 claris-fuse restore /mount/point/file.txt --version=3
 ```
 
-The version history database `claris-fuse.db` will be stored in the source directory that is being mounted, allowing the version history to persist between different mount sessions.
+The version history database `claris-fuse.db` will be stored in the source directory that is being mounted, allowing the version history to persist between different mount sessions. This database file will be visible in the source directory when it's not mounted, but will be hidden from view when the filesystem is mounted (i.e., it won't be visible in the mount point).
 
 ## Development Status
 - Initial research phase
