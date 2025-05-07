@@ -1,15 +1,15 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOptions, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
+    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory,
     ReplyEntry, ReplyOpen, Request,
 };
-use libc::{EACCES, EEXIST, ENOENT, ENOTDIR, ENOTEMPTY, O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_WRONLY};
+use libc::{ENOENT, ENOTDIR, O_APPEND, O_CREAT, O_RDWR, O_WRONLY};
 use log::debug;
 
 const TTL: Duration = Duration::from_secs(1); // 1 second
@@ -33,8 +33,8 @@ impl PassthroughFS {
     }
 
     /// Mount the filesystem at the given path
-    pub fn mount<P: AsRef<Path>>(self, mountpoint: P) -> Result<(), Box<dyn std::error::Error>> {
-        let options = MountOptions::default();
+    pub fn mount<P: AsRef<Path>>(self, mountpoint: P) -> std::io::Result<()> {
+        let options = vec![MountOption::RO, MountOption::FSName("claris-fuse".to_string())];
         fuser::mount2(self, mountpoint, &options)?;
         Ok(())
     }
@@ -100,7 +100,7 @@ impl Filesystem for PassthroughFS {
         }
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         debug!("getattr(ino={})", ino);
 
         let path = if ino == 1 {
