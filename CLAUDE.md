@@ -14,6 +14,7 @@ Claris-FUSE is a FUSE filesystem implementation in Rust that maintains a linear 
 - **SQLite**: Initial storage backend for revision history
   - Simple to implement and maintain
   - Good performance for initial development
+  - Database stored in source directory as `claris-fuse.db`
 - **Pluggable Storage Engine**: Using Rust traits to support multiple backends
   - SQLite as default implementation
   - Interface for creating custom storage engines
@@ -49,6 +50,8 @@ claris-fuse history /mount/point/file.txt
 # Restore a file to a previous version
 claris-fuse restore /mount/point/file.txt --version=3
 ```
+
+The version history database `claris-fuse.db` will be stored in the source directory that is being mounted, allowing the version history to persist between different mount sessions.
 
 ## Development Status
 - Initial research phase
