@@ -73,9 +73,27 @@ The FUSE driver will be able to write to the "hidden" `claris-fuse.db` file in t
 4. Since the driver knows the real path of the source directory, it can directly access the database file while keeping it hidden from the mounted view
 
 ## Development Status
-- Initial research phase
-- Selected fuser crate over fuse-rs
-- Planning implementation details
+
+### Completed
+- Phase 1: Foundation
+  - Initialized Rust workspace with binary and library crates
+  - Added fuser dependency for FUSE implementation
+  - Implemented basic passthrough filesystem
+  - Designed storage trait interface for version history
+  - Designed SQLite schema for version history storage
+
+### In Progress
+- Phase 2: Core Functionality
+  - Implementing SQLite storage backend
+  - Adding versioning layer for core operations
+  - Creating CLI tools for browsing and restoring history
+
+### Planned
+- Phase 3: Advanced Features
+  - Async background processing for LLM descriptions
+  - LLM API integration for change descriptions
+  - Search capabilities across descriptions
+  - Configurable retention policies
 
 ## File Operations to Support
 
