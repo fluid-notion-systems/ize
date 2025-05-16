@@ -142,7 +142,7 @@ impl SqliteStorage {
         let id: i64 = row.get(0)?;
         let operation_type_str: String = row.get(1)?;
         let operation_type = operation_type_str.parse::<OperationType>()
-            .map_err(|e| rusqlite::Error::ExecuteReturnedResults)?;
+            .map_err(|_e| rusqlite::Error::ExecuteReturnedResults)?;
         let timestamp: i64 = row.get(2)?;
         let size: i64 = row.get(3)?;
         let content_hash: Option<String> = row.get(4)?;

@@ -1,9 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::SystemTime;
 use async_trait::async_trait;
 
 use super::models::{
-    FileChange, FileMetadata, FileVersion, VersionedFile, VersionQuery, DomainError, OperationType,
+    FileChange, FileMetadata, FileVersion, VersionedFile, VersionQuery, OperationType,
 };
 use super::repositories::{VersionRepository, SearchableVersionRepository, RepositoryResult};
 

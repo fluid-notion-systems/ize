@@ -1,5 +1,5 @@
 use diesel::prelude::*;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use super::schema::*;
 
 /// Database model that directly maps to the file_paths table
@@ -78,8 +78,9 @@ pub struct DbVersionFts {
 
 /// Convert a UNIX timestamp to DateTime<Utc>
 pub fn timestamp_to_datetime(timestamp: i64) -> DateTime<Utc> {
-    let naive = NaiveDateTime::from_timestamp_opt(timestamp, 0)
-        .unwrap_or_else(|| NaiveDateTime::from_timestamp_opt(0, 0).unwrap());
+    let naive = DateTime::from_timestamp(timestamp, 0)
+        .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap())
+        .naive_utc();
     DateTime::from_naive_utc_and_offset(naive, Utc)
 }
 
