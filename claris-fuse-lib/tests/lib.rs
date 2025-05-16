@@ -6,6 +6,6 @@ mod tests {
     #[test]
     fn it_works() {
         // This is a placeholder test that will always pass
-        assert!(true);
+        // Test passes without assertion
     }
 }

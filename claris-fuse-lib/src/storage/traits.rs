@@ -1,6 +1,6 @@
-use std::path::PathBuf;
-use std::time::SystemTime;
 use async_trait::async_trait;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use thiserror::Error;
 
 /// Enum representing the type of file operation
@@ -72,22 +72,22 @@ impl std::str::FromStr for OperationType {
 pub struct FileVersion {
     /// Unique identifier for this version
     pub id: i64,
-    
+
     /// Path of the file relative to the mount point
     pub path: PathBuf,
-    
+
     /// Type of operation that created this version
     pub operation_type: OperationType,
-    
+
     /// When this version was created
     pub timestamp: SystemTime,
-    
+
     /// Size of the file at this version
     pub size: u64,
-    
+
     /// Content hash to identify content (for deduplication)
     pub content_hash: Option<String>,
-    
+
     /// Optional AI-generated description of the change
     pub description: Option<String>,
 }
@@ -97,7 +97,7 @@ pub struct FileVersion {
 pub struct VersionedFile {
     /// Path of the file relative to the mount point
     pub path: PathBuf,
-    
+
     /// List of versions, sorted by timestamp (newest first)
     pub versions: Vec<FileVersion>,
 }
@@ -107,16 +107,16 @@ pub struct VersionedFile {
 pub enum StorageError {
     #[error("File not found: {0}")]
     FileNotFound(PathBuf),
-    
+
     #[error("Version not found: {0}")]
     VersionNotFound(i64),
-    
+
     #[error("Storage error: {0}")]
     StorageError(String),
-    
+
     #[error("IO error: {0}")]
     IOError(#[from] std::io::Error),
-    
+
     #[error("Database error: {0}")]
     DatabaseError(String),
 }
@@ -129,18 +129,18 @@ pub type StorageResult<T> = Result<T, StorageError>;
 pub trait StorageBackend: Send + Sync {
     /// Initialize the storage backend
     async fn init(&self) -> StorageResult<()>;
-    
+
     /// Close the storage backend and clean up resources
     async fn close(&self) -> StorageResult<()>;
-    
+
     /// Get the name of the storage backend
     fn name(&self) -> &str;
-    
+
     /// Get the version of the storage backend
     fn version(&self) -> &str;
 }
 
-/// Storage trait defining the operations required for version history 
+/// Storage trait defining the operations required for version history
 #[async_trait]
 pub trait VersionStorage: StorageBackend {
     /// Record a new file version
@@ -152,14 +152,14 @@ pub trait VersionStorage: StorageBackend {
     ) -> StorageResult<i64>;
     
     /// Get all versions of a file
-    async fn get_file_versions(&self, path: &PathBuf) -> StorageResult<VersionedFile>;
-    
+    async fn get_file_versions(&self, path: &Path) -> StorageResult<VersionedFile>;
+
     /// Get a specific version of a file
     async fn get_version(&self, version_id: i64) -> StorageResult<FileVersion>;
-    
+
     /// Get the content of a specific version
     async fn get_version_content(&self, version_id: i64) -> StorageResult<Option<Vec<u8>>>;
-    
+
     /// Get all versions with optional filters
     async fn get_versions(
         &self,
@@ -175,7 +175,7 @@ pub trait VersionStorage: StorageBackend {
 pub trait SearchableStorage: VersionStorage {
     /// Search versions by description (when AI descriptions are available)
     async fn search_versions_by_description(&self, query: &str) -> StorageResult<Vec<FileVersion>>;
-    
+
     /// Update the AI-generated description for a version
     async fn update_description(&self, version_id: i64, description: String) -> StorageResult<()>;
 }

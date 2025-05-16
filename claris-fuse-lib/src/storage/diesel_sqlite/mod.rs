@@ -286,7 +286,7 @@ impl VersionStorage for DieselSqliteStorage {
         }
     }
 
-    async fn get_file_versions(&self, path_buf: &PathBuf) -> StorageResult<VersionedFile> {
+    async fn get_file_versions(&self, path_buf: &Path) -> StorageResult<VersionedFile> {
         use self::schema::file_paths::dsl::{file_paths, path};
         use self::schema::versions::dsl::{file_path_id, timestamp, versions};
 
@@ -302,7 +302,7 @@ impl VersionStorage for DieselSqliteStorage {
 
         let path_id = match file_path_entry {
             Some(fp) => fp.id,
-            None => return Err(StorageError::FileNotFound(path_buf.clone())),
+            None => return Err(StorageError::FileNotFound(path_buf.to_path_buf())),
         };
 
         // Get all versions for this file path
@@ -315,12 +315,12 @@ impl VersionStorage for DieselSqliteStorage {
         // Convert to domain models
         let mut file_versions = Vec::new();
         for db_version in db_versions {
-            let version = self.db_version_to_file_version(db_version, path_buf.clone())?;
+            let version = self.db_version_to_file_version(db_version, path_buf.to_path_buf())?;
             file_versions.push(version);
         }
 
         Ok(VersionedFile {
-            path: path_buf.clone(),
+            path: path_buf.to_path_buf(),
             versions: file_versions,
         })
     }
@@ -405,7 +405,7 @@ impl VersionStorage for DieselSqliteStorage {
             if !op_types.is_empty() {
                 let op_strings: Vec<String> = op_types
                     .iter()
-                    .map(|op| Self::operation_type_to_string(op))
+                    .map(Self::operation_type_to_string)
                     .collect();
 
                 query = query.filter(operation_type.eq_any(op_strings));

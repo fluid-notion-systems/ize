@@ -218,7 +218,7 @@ impl VersionStorage for SqliteStorage {
             StorageError::DatabaseError("Database not initialized".to_string())
         )?;
         
-        let content_ref = content.as_ref().map(|c| c.as_slice());
+        let content_ref = content.as_deref();
         let version_id = self.record_version_with_conn(conn, &path, &operation_type, content_ref)
             .map_err(|e| StorageError::StorageError(format!("Failed to record version: {}", e)))?;
             
@@ -226,7 +226,7 @@ impl VersionStorage for SqliteStorage {
         Ok(version_id)
     }
     
-    async fn get_file_versions(&self, path: &PathBuf) -> StorageResult<VersionedFile> {
+    async fn get_file_versions(&self, path: &Path) -> StorageResult<VersionedFile> {
         let conn_guard = self.connection.lock().await;
         let conn = conn_guard.as_ref().ok_or_else(|| 
             StorageError::DatabaseError("Database not initialized".to_string())
@@ -239,7 +239,7 @@ impl VersionStorage for SqliteStorage {
             .map_err(|e| StorageError::DatabaseError(format!("Query error: {}", e)))?;
             
         let file_path_id: i64 = stmt.query_row(params![path_str], |row| row.get(0))
-            .map_err(|_| StorageError::FileNotFound(path.clone()))?;
+            .map_err(|_| StorageError::FileNotFound(path.to_path_buf()))?;
             
         // Get versions for this file
         let mut stmt = conn.prepare(
@@ -250,7 +250,7 @@ impl VersionStorage for SqliteStorage {
         ).map_err(|e| StorageError::DatabaseError(format!("Query error: {}", e)))?;
         
         let rows = stmt.query_map(params![file_path_id], |row| {
-            self.load_version_from_row(path.clone(), row)
+            self.load_version_from_row(path.to_path_buf(), row)
         }).map_err(|e| StorageError::DatabaseError(format!("Query error: {}", e)))?;
         
         let mut versions = Vec::new();
@@ -262,7 +262,7 @@ impl VersionStorage for SqliteStorage {
         }
         
         Ok(VersionedFile {
-            path: path.clone(),
+            path: path.to_path_buf(),
             versions,
         })
     }
@@ -387,7 +387,7 @@ impl VersionStorage for SqliteStorage {
             if !ops.is_empty() {
                 query.push_str(" AND v.operation_type IN (");
                 query.push_str(&vec!["?"; ops.len()].join(", "));
-                query.push_str(")");
+                query.push(')');
                 
                 for op in ops {
                     params.push(op.to_string());

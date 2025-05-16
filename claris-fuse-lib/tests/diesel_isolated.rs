@@ -145,9 +145,8 @@ struct NewDbContent<'a> {
 #[test]
 fn test_create_and_retrieve_file_path() {
     // Skip test if migrations aren't available
-    // Replacing with a simple test that always passes
+    // This test is a placeholder that will always pass
     // In a real test you'd use real migrations
-    assert!(true);
     
     // To test with an actual database, you'd uncomment this code:
     /*

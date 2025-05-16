@@ -122,7 +122,7 @@ mod model_tests {
             id: 1,
             file_path_id: file_path.id,
             operation_type: "WRITE".to_string(),
-            timestamp: timestamp,
+            timestamp,
             size: 1024,
             content_hash: Some("hash123".to_string()),
             description: Some("Test version".to_string()),
