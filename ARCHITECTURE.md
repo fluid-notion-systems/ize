@@ -44,11 +44,9 @@ Claris-FUSE is a FUSE filesystem implementation in Rust that maintains a linear 
 # Initialize a directory for version control (creates claris-fuse.db)
 claris-fuse init /path/to/directory
 
-# Mount the filesystem (mounts only if claris-fuse.db exists)
-# The directory specified is the mount point
-claris-fuse mount /path/to/mount/point
-# If no directory is specified, uses the current directory
-claris-fuse mount
+# Mount the filesystem
+# The first argument is the database file, the second is the mount point
+claris-fuse mount /path/to/directory/claris-fuse.db /path/to/mount/point
 
 # View version history of a file
 claris-fuse history /path/to/file.txt
@@ -57,20 +55,22 @@ claris-fuse history /path/to/file.txt
 claris-fuse restore /path/to/file.txt --version=3
 ```
 
-The version history database `claris-fuse.db` will be stored in the source directory that is being mounted, allowing the version history to persist between different mount sessions. This database file will be visible in the source directory when it's not mounted, but will be hidden from view when the filesystem is mounted (i.e., it won't be visible in the mount point).
+The version history database file (typically named `claris-fuse.db`) is specified separately from the mount point. The database file can be located anywhere on the filesystem except inside the mount point directory (this is checked and prevented to avoid recursion issues). When mounted, the database file will be hidden from the view in the mount point, even though other files in its directory will be visible.
 
-The `mount` command will only accept the directory name to mount (or use the current directory if none is specified), and it will only mount the directory if there is a `claris-fuse.db` file present in that directory. The specified directory will serve as the mount point itself.
+The `mount` command requires two parameters: the path to the database file and the path to the mount point. The content shown in the mount point will be from the directory containing the database file.
 
-### Implementation Note on Database Access
+### Implementation Notes on Database Access
 
-The FUSE driver will be able to write to the "hidden" `claris-fuse.db` file in the following way:
+The FUSE driver will be able to work with the database file in the following way:
 
 1. When the FUSE driver intercepts filesystem operations, it will record changes to the database
-2. For `readdir` operations (listing directory contents), the driver will filter out the database file from results
-3. The driver will maintain two different views:
+2. The database file path is stored separately from the mount point
+3. For `readdir` operations (listing directory contents), the driver will filter out the database file from results
+4. The driver maintains two different views:
    - The virtualized view presented to users (without the .db file)
    - Direct access to the underlying filesystem where it can read/write the .db file
-4. Since the driver knows the real path of the source directory, it can directly access the database file while keeping it hidden from the mounted view
+5. The system prevents mounting a filesystem where the database file is inside the mount point, avoiding potential recursion issues
+6. The source directory for files shown in the mount point is automatically derived from the database file's location
 
 ## Development Status
 
