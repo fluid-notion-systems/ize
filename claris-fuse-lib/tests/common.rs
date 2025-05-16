@@ -15,7 +15,7 @@ pub fn setup_test_db() -> (SqliteConnection, PathBuf) {
     let db_path = temp_dir.path().join("test.db");
     
     // Create a new SQLite connection
-    let connection = SqliteConnection::establish(db_path.to_str().unwrap())
+    let mut connection = SqliteConnection::establish(db_path.to_str().unwrap())
         .expect("Failed to create SQLite connection");
     
     // Run migrations to set up the schema
