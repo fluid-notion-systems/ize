@@ -16,32 +16,76 @@ const TTL: Duration = Duration::from_secs(1); // 1 second
 
 /// A basic passthrough filesystem implementation
 pub struct PassthroughFS {
-    source_path: PathBuf,
+    db_path: PathBuf,
+    mount_point: PathBuf,
 }
 
 impl PassthroughFS {
     /// Create a new passthrough filesystem
-    pub fn new<P: AsRef<Path>>(source_path: P) -> Self {
-        Self {
-            source_path: source_path.as_ref().to_path_buf(),
+    ///
+    /// # Errors
+    /// Returns an error if the database file is within the mount point directory
+    pub fn new<P: AsRef<Path>, Q: AsRef<Path>>(db_path: P, mount_point: Q) -> std::io::Result<Self> {
+        let fs = Self {
+            db_path: db_path.as_ref().to_path_buf(),
+            mount_point: mount_point.as_ref().to_path_buf(),
+        };
+        
+        // Check if the database file is inside the mount point
+        if fs.is_db_inside_mount_point() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Database file cannot be inside the mount point directory"
+            ));
         }
+        
+        Ok(fs)
     }
 
-    /// Get the source path 
-    pub fn source_path(&self) -> &Path {
-        &self.source_path
+    /// Check if the database file is inside the mount point directory
+    fn is_db_inside_mount_point(&self) -> bool {
+        let db_path_canon = match std::fs::canonicalize(&self.db_path) {
+            Ok(path) => path,
+            Err(_) => return false, // Can't determine, assume it's not inside
+        };
+        
+        let mount_point_canon = match std::fs::canonicalize(&self.mount_point) {
+            Ok(path) => path,
+            Err(_) => return false, // Can't determine, assume it's not inside
+        };
+        
+        db_path_canon.starts_with(mount_point_canon)
     }
 
-    /// Mount the filesystem at the given path
-    pub fn mount<P: AsRef<Path>>(self, mountpoint: P) -> std::io::Result<()> {
+    /// Get the database path
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
+    }
+
+    /// Get the mount point
+    pub fn mount_point(&self) -> &Path {
+        &self.mount_point
+    }
+    
+    /// Get the source directory (parent directory of the database file)
+    fn db_source_dir(&self) -> PathBuf {
+        self.db_path.parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf()
+    }
+
+    /// Mount the filesystem
+    pub fn mount(self) -> std::io::Result<()> {
         let options = vec![MountOption::RO, MountOption::FSName("claris-fuse".to_string())];
-        fuser::mount2(self, mountpoint, &options)?;
+        // We need to clone mount_point because fuser::mount2 takes ownership of self
+        let mount_point = self.mount_point.clone();
+        fuser::mount2(self, mount_point, &options)?;
         Ok(())
     }
 
     // Helper method to get the real path on the underlying filesystem
     fn real_path(&self, path: &Path) -> PathBuf {
-        self.source_path.join(path.strip_prefix("/").unwrap_or(path))
+        self.db_source_dir().join(path.strip_prefix("/").unwrap_or(path))
     }
 
     // Helper to convert a file's metadata to FUSE file attributes
@@ -209,6 +253,12 @@ impl Filesystem for PassthroughFS {
             match entry {
                 Ok(entry) => {
                     let file_name = entry.file_name();
+                    
+                    // Skip the database file if we're in the root directory
+                    if ino == 1 && file_name == self.db_path.file_name().unwrap_or_default() {
+                        continue;
+                    }
+                    
                     let file_path = entry.path();
                     let entry_ino = file_path.to_str()
                         .unwrap_or_default()

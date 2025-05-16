@@ -21,9 +21,9 @@ struct Cli {
 enum Commands {
     /// Mount a filesystem with version control
     Mount {
-        /// Source directory path
-        #[arg(value_name = "SOURCE")]
-        source: PathBuf,
+        /// Database file path
+        #[arg(value_name = "DB_PATH")]
+        db_path: PathBuf,
 
         /// Mount point directory
         #[arg(value_name = "MOUNTPOINT")]
@@ -43,12 +43,12 @@ fn main() -> Result<()> {
     env_logger::init_from_env(env);
 
     match cli.command {
-        Commands::Mount { source, mountpoint } => {
-            info!("Mounting filesystem from {:?} to {:?}", source, mountpoint);
+        Commands::Mount { db_path, mountpoint } => {
+            info!("Mounting filesystem with database {:?} to mount point {:?}", db_path, mountpoint);
             
             // Create and mount the passthrough filesystem
-            let fs = PassthroughFS::new(source);
-            fs.mount(mountpoint)?;
+            let fs = PassthroughFS::new(db_path, mountpoint)?;
+            fs.mount()?;
         }
     }
 
