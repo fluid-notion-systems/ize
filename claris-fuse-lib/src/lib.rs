@@ -1,3 +1,4 @@
+pub mod domain;
 pub mod filesystem;
 pub mod storage;
 
