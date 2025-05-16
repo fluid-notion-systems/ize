@@ -43,6 +43,7 @@ mod model_tests {
     // Define the model structs
     #[derive(Queryable, Identifiable, Debug, Clone)]
     #[diesel(table_name = file_paths)]
+    #[allow(dead_code)]
     struct DbFilePath {
         pub id: i64,
         pub path: String,
@@ -61,6 +62,7 @@ mod model_tests {
     #[derive(Queryable, Identifiable, Associations, Debug, Clone)]
     #[diesel(table_name = versions)]
     #[diesel(belongs_to(DbFilePath, foreign_key = file_path_id))]
+    #[allow(dead_code)]
     struct DbVersion {
         pub id: i64,
         pub file_path_id: i64,
@@ -86,6 +88,7 @@ mod model_tests {
     #[diesel(table_name = contents)]
     #[diesel(primary_key(version_id))]
     #[diesel(belongs_to(DbVersion, foreign_key = version_id))]
+    #[allow(dead_code)]
     struct DbContent {
         pub version_id: i64,
         pub data: Vec<u8>,

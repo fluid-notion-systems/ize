@@ -1,5 +1,4 @@
 use diesel::prelude::*;
-use diesel::sql_types::Text;
 use diesel::sqlite::SqliteConnection;
 use diesel::QueryableByName;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};

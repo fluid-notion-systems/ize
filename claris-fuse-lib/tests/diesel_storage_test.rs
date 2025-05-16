@@ -7,7 +7,6 @@ use serial_test::serial;
 // use claris_fuse_lib::storage::diesel_sqlite::DieselSqliteStorageFactory;
 // use claris_fuse_lib::storage::{StorageBackend, VersionStorage, SearchableStorage};
 // use claris_fuse_lib::storage::models::{FileVersion, OperationType};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /*
 fn setup_test_db() -> (DieselSqliteStorage, PathBuf) {
@@ -23,6 +22,7 @@ fn setup_test_db() -> (DieselSqliteStorage, PathBuf) {
 */
 
 // Temporary placeholder until DieselSqliteStorage is properly exposed
+#[allow(dead_code)]
 fn setup_test_db() -> ((), PathBuf) {
     // Create a temporary directory for our test database
     let temp_dir = tempdir().expect("Failed to create temporary directory");

@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 // Setup a test database
+#[allow(dead_code)]
 fn setup_test_db() -> (SqliteConnection, PathBuf) {
     // Create a temporary directory for our test database
     let temp_dir = tempdir().expect("Failed to create temporary directory");
@@ -26,6 +27,7 @@ fn setup_test_db() -> (SqliteConnection, PathBuf) {
 }
 
 // Get current timestamp
+#[allow(dead_code)]
 fn get_unix_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -34,6 +36,7 @@ fn get_unix_timestamp() -> i64 {
 }
 
 // Cleanup utility
+#[allow(dead_code)]
 fn cleanup(db_path: PathBuf) {
     if db_path.exists() {
         std::fs::remove_file(db_path).expect("Failed to remove test database file");
@@ -81,6 +84,7 @@ allow_tables_to_appear_in_same_query!(
 // Define the model structs
 #[derive(Queryable, Identifiable, Debug, Clone)]
 #[diesel(table_name = file_paths)]
+#[allow(dead_code)]
 struct DbFilePath {
     pub id: i64,
     pub path: String,
@@ -99,6 +103,7 @@ struct NewDbFilePath<'a> {
 #[derive(Queryable, Identifiable, Associations, Debug, Clone)]
 #[diesel(table_name = versions)]
 #[diesel(belongs_to(DbFilePath, foreign_key = file_path_id))]
+#[allow(dead_code)]
 struct DbVersion {
     pub id: i64,
     pub file_path_id: i64,
@@ -124,6 +129,7 @@ struct NewDbVersion<'a> {
 #[diesel(table_name = contents)]
 #[diesel(primary_key(version_id))]
 #[diesel(belongs_to(DbVersion, foreign_key = version_id))]
+#[allow(dead_code)]
 struct DbContent {
     pub version_id: i64,
     pub data: Vec<u8>,

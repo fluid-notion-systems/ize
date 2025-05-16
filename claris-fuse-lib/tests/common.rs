@@ -6,9 +6,11 @@ use diesel::prelude::*;
 use diesel_migrations::{MigrationHarness, EmbeddedMigrations};
 
 // Get the migrations from the diesel_sqlite module
+#[allow(dead_code)]
 pub const MIGRATIONS: EmbeddedMigrations = 
     diesel_migrations::embed_migrations!("migrations");
 
+#[allow(dead_code)]
 pub fn setup_test_db() -> (SqliteConnection, PathBuf) {
     // Create a temporary directory for our test database
     let temp_dir = tempdir().expect("Failed to create temporary directory");
@@ -25,12 +27,14 @@ pub fn setup_test_db() -> (SqliteConnection, PathBuf) {
     (connection, db_path)
 }
 
+#[allow(dead_code)]
 pub fn cleanup(db_path: PathBuf) {
     if db_path.exists() {
         fs::remove_file(db_path).expect("Failed to remove test database file");
     }
 }
 
+#[allow(dead_code)]
 pub fn get_unix_timestamp() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     
