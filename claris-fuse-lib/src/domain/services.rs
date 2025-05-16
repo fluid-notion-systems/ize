@@ -198,7 +198,7 @@ impl SearchService for DefaultSearchService {
 /// A factory for creating domain services
 pub trait ServiceFactory: Send + Sync {
     /// Create a version service
-    fn create_version_service(&self) -> Box<dyn VersionService>;
+    fn create_version_service(&self) -> DefaultVersionService;
     
     /// Create a search service
     fn create_search_service(&self) -> Box<dyn SearchService>;
