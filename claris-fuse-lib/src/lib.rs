@@ -1,7 +1,7 @@
 // pub mod domain;
 // pub mod filesystem;
-// pub mod storage;
 pub mod filesystems;
+pub mod storage;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

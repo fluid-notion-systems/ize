@@ -276,6 +276,7 @@ dependencies = [
  "hex",
  "libc",
  "log",
+ "nix 0.30.1",
  "r2d2",
  "rusqlite",
  "serial_test",

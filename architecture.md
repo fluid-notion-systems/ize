@@ -7,7 +7,7 @@ Claris-FUSE is a FUSE filesystem implementation in Rust that maintains a linear 
 - **Rust**: Programming language
 - **Fuser (v0.15.1)**: A maintained fork of the fuse-rs crate that provides FUSE bindings for Rust
   - Benefits over fuse-rs:
-    - Actively maintained (last commit: May 2025)
+    - Actively maintained (last commit: May 2023)
     - Support for newer FUSE ABIs
     - Better documentation and examples
     - File descriptor passthrough functionality
@@ -20,14 +20,21 @@ Claris-FUSE is a FUSE filesystem implementation in Rust that maintains a linear 
   - Interface for creating custom storage engines
   - Easy to swap implementations as performance needs change
 
-## Key Features (Planned)
-1. Transparent versioning of all file operations
-2. Ability to view file history
-3. Restoring files to previous versions
-4. History browsing through special filesystem interface
-5. Configurable retention policies
-6. AI-powered commit messages for file changes
-7. Extended search capabilities through file history
+## Key Features (Implemented and Planned)
+1. **Implemented**:
+   - Transparent filesystem passthrough
+   - Database initialization and validation
+   - Read-only mode support
+   - Command-line interface for all operations
+
+2. **Planned**:
+   - Transparent versioning of all file operations
+   - Ability to view file history
+   - Restoring files to previous versions
+   - History browsing through special filesystem interface
+   - Configurable retention policies
+   - AI-powered commit messages for file changes
+   - Extended search capabilities through file history
 
 ## Implementation Approach
 1. Use the fuser crate to implement core FUSE functionality
@@ -39,61 +46,135 @@ Claris-FUSE is a FUSE filesystem implementation in Rust that maintains a linear 
 7. Allow for alternative storage backends to be implemented and plugged in
 8. Integrate with LLM API for generating descriptive change summaries
 
-## Usage Examples (Planned)
+## Usage Examples
 ```bash
 # Initialize a directory for version control (creates claris-fuse.db)
 claris-fuse init /path/to/directory
 
 # Mount the filesystem
-# The first argument is the database file, the second is the mount point
+# The first argument is the initialized directory, the second is the mount point
 claris-fuse mount /path/to/initialized/directory /path/to/mount/point
 
-# View version history of a file
+# Mount in read-only mode
+claris-fuse mount --read-only /path/to/initialized/directory /path/to/mount/point
+
+# View version history of a file (planned)
 claris-fuse history /path/to/file.txt
 
-# Restore a file to a previous version
+# Restore a file to a previous version (planned)
 claris-fuse restore /path/to/file.txt --version=3
 ```
 
-The version history database file (typically named `claris-fuse.db`) is specified separately from the mount point. The database file can be located anywhere on the filesystem except inside the mount point directory (this is checked and prevented to avoid recursion issues). When mounted, the database file will be hidden from the view in the mount point, even though other files in its directory will be visible.
+The version history database file (typically named `claris-fuse.db`) is created when initializing a directory for version control. The database file can be located anywhere on the filesystem except inside the mount point directory (this is checked and prevented to avoid recursion issues). When mounted, the database file will be hidden from the view in the mount point, even though other files in its directory will be visible.
 
-The `mount` command requires two parameters: the path to the database file and the path to the mount point. The content shown in the mount point will be from the directory containing the database file.
+The `mount` command requires two parameters: the path to the initialized directory and the path to the mount point. The content shown in the mount point will be from the directory containing the database file.
 
-### Implementation Notes on Database Access
+## System Architecture
 
-The FUSE driver will be able to work with the database file in the following way:
+### Storage Subsystem
+The storage subsystem is designed with a trait-based approach to allow for multiple backend implementations:
 
-1. When the FUSE driver intercepts filesystem operations, it will record changes to the database
-2. The database file path is stored separately from the mount point
-3. For `readdir` operations (listing directory contents), the driver will filter out the database file from results
-4. The driver maintains two different views:
-   - The virtualized view presented to users (without the .db file)
-   - Direct access to the underlying filesystem where it can read/write the .db file
-5. The system prevents mounting a filesystem where the database file is inside the mount point, avoiding potential recursion issues
-6. The source directory for files shown in the mount point is automatically derived from the database file's location
+1. **Storage Trait**: Defines core operations for any storage engine:
+   - `read` - Read data from storage
+   - `write` - Write data to storage
+   - `delete` - Delete data from storage
+
+2. **StorageManager**: Static methods for initializing, validating, and opening storage:
+   - `init` - Initialize a new database in the specified directory
+   - `is_valid` - Check if a directory contains a valid database
+   - `open` - Open an existing database for read/write operations
+
+3. **SqliteStorage**: Default implementation using SQLite:
+   - Manages database schema creation
+   - Handles data storage and retrieval
+   - Provides version history tracking
+
+### Database Schema
+The SQLite schema is designed to efficiently track file and directory history:
+
+1. **Directories**:
+   - `id`: BigInt (Primary Key)
+   - `path`: Text (Unique)
+   - `created_at`: BigInt (Unix timestamp)
+   - `metadata_id`: Foreign Key to Metadata
+
+2. **Files**:
+   - `id`: BigInt (Primary Key)
+   - `directory_id`: BigInt (Foreign Key to Directory)
+   - `name`: Text
+   - `created_at`: BigInt (Unix timestamp)
+   - `metadata_id`: BigInt (Foreign Key to Metadata)
+
+3. **Metadata** (shared between files and directories):
+   - `id`: BigInt (Primary Key)
+   - `mode`: Integer (File permissions)
+   - `uid`: Integer (User ID)
+   - `gid`: Integer (Group ID)
+   - `atime`: BigInt (Access time)
+   - `mtime`: BigInt (Modification time)
+   - `ctime`: BigInt (Change time - when metadata or content was last changed)
+
+4. **Content**:
+   - `id`: BigInt (Primary Key)
+   - `file_id`: BigInt (Foreign Key to File)
+   - `data`: Binary (The actual file content as raw bytes)
+
+### Filesystem Implementation
+The PassthroughFS implementation provides base filesystem functionality:
+
+1. **Core Features**:
+   - Transparent file and directory operations
+   - Read-only mode support
+   - Database path validation
+   - Hiding the database file from the mounted view
+
+2. **Extension Points**:
+   - Hooks for version tracking in all write operations
+   - Integration points for storing file changes
+   - Support for metadata operations
+
+### Command Line Interface
+The CLI is implemented using clap with the following commands:
+
+1. **init**: Initialize a directory for version control
+   - Creates a new SQLite database
+   - Sets up initial schema and root directory
+
+2. **mount**: Mount a version-controlled filesystem
+   - Verifies the directory is properly initialized
+   - Supports read-only mode
+   - Option to unmount on program exit
+
+3. **history**: View file version history
+   - Show changes made to a file over time
+   - Support for limiting number of versions displayed
+   - Verbose mode for detailed information
+
+4. **restore**: Restore file to a previous version
+   - Restore specific file version
+   - Force option to skip confirmation
 
 ## Development Status
 
+### Completed
+- Basic FUSE filesystem implementation
+- Database schema design
+- Storage trait interface and SQLite implementation
+- Directory initialization command
+- Mount command with validation and read-only support
+- Signal handling for clean unmounting
+
 ### In Progress
-- Phase 1: Foundation
-  - Initialized Rust workspace with binary and library crates
-  - Added fuser dependency for FUSE implementation
-  - Implemented basic passthrough filesystem
-  - Designed storage trait interface for version history
-  - Designed SQLite schema for version history storage
+- Version tracking for file operations
+- History command implementation
+- File restoration functionality
 
 ### Planned
-- Phase 2: Core Functionality
-  - Implementing SQLite storage backend
-  - Adding versioning layer for core operations
-  - Creating CLI tools for browsing and restoring history
-
-### Planned
-- Phase 3: Advanced Features
-  - Async background processing for LLM descriptions
-  - LLM API integration for change descriptions
-  - Search capabilities across descriptions
-  - Configurable retention policies
+- Metadata-only changes tracking
+- Delta storage for efficient version history
+- Extended search capabilities
+- Configuration options for retention policies
+- LLM integration for semantic change descriptions
 
 ## File Operations to Support
 
@@ -130,8 +211,9 @@ The following FUSE filesystem operations will need to be implemented and tracked
 9. **listxattr** - Listing extended attributes
 10. **flush/fsync/release** - Managing file handles
 
-## AI-Powered Change Descriptions
+## Future Enhancements
 
+### AI-Powered Change Descriptions
 For meaningful file change descriptions:
 1. Capture original and modified file content for each operation
 2. Queue changes in background work queue for asynchronous processing
@@ -141,35 +223,13 @@ For meaningful file change descriptions:
 6. Provide search capabilities across these descriptions
 7. Allow filtering history based on semantic descriptions
 
-The asynchronous approach ensures:
-- Filesystem operations remain fast and responsive
-- LLM API processing doesn't block file operations
-- Descriptions are generated in background without impacting user experience
-- System can handle high-volume changes without performance degradation
-- Queue can be persisted to handle restarts/crashes
-
-## Development Phases and Branching Strategy
-
-Each phase of development will use a dedicated feature branch, with periodic merges to main after completing significant milestones. Each development step should have at least one dedicated commit with a clear, descriptive commit message.
-
-### Phase 1: Foundation (`feature/foundation`)
-1. Initialize Rust workspace (commit)
-2. Add fuser dependency (commit)
-3. Implement basic passthrough filesystem (1+ commits)
-4. Design version history storage schema (commit)
-5. Implement storage trait interface (commit)
-
-### Phase 2: Core Functionality (`feature/core-versioning`)
-1. Create SQLite storage backend (1+ commits)
-2. Add versioning layer for core operations (multiple commits, one per operation type)
-3. Create CLI tools for browsing and restoring history (1+ commits)
-4. Write comprehensive tests (multiple commits, organized by component)
-
-### Phase 3: Advanced Features (`feature/llm-integration`)
-1. Implement async background processing system for LLM descriptions (1+ commits)
-2. Integrate LLM API for change descriptions (1+ commits)
-3. Add search capabilities across descriptions (commit)
-4. Implement configurable retention policies (commit)
+### Delta Storage
+To optimize storage use for large files:
+1. Store initial file content in full
+2. For subsequent changes, store binary deltas
+3. Calculate deltas using efficient diff algorithms
+4. Provide configuration for compression and retention policies
+5. Support pruning of historical versions based on age or space constraints
 
 ## Commit Guidelines
 

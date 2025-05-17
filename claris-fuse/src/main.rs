@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use claris_fuse_lib::filesystems::passthrough::PassthroughFS;
-use ctrlc;
+use claris_fuse_lib::storage::StorageManager;
 use env_logger::Env;
 use log::{error, info};
 use std::path::PathBuf;
@@ -95,8 +95,25 @@ fn main() -> Result<()> {
         Commands::Init { directory } => {
             info!("Initializing directory {:?} for version control", directory);
 
-            // TODO: Implement initialization logic
-            println!("Directory initialization not yet implemented");
+            // Check if directory exists
+            if !directory.exists() {
+                error!("Directory does not exist: {:?}", directory);
+                return Err(anyhow::anyhow!("Directory does not exist"));
+            }
+
+            // Check if directory is actually a directory
+            if !directory.is_dir() {
+                error!("Path is not a directory: {:?}", directory);
+                return Err(anyhow::anyhow!("Path is not a directory"));
+            }
+
+            // Initialize the database
+            StorageManager::init(&directory)
+                .with_context(|| format!("Failed to initialize storage in {:?}", directory))?;
+
+            println!("Successfully initialized directory for version control");
+            println!("You can now mount the filesystem with:");
+            println!("claris-fuse mount {:?} <mountpoint>", directory);
         }
         Commands::Mount {
             source_dir,
@@ -110,12 +127,27 @@ fn main() -> Result<()> {
                 if read_only { " (read-only)" } else { "" }
             );
 
+            // Check if the directory was initialized
+            if !StorageManager::is_valid(&source_dir).with_context(|| {
+                format!(
+                    "Failed to check if {:?} is a valid Claris-FUSE directory",
+                    source_dir
+                )
+            })? {
+                error!(
+                    "Directory {:?} has not been initialized for version control",
+                    source_dir
+                );
+                error!("Run 'claris-fuse init {:?}' first", source_dir);
+                return Err(anyhow::anyhow!("Directory not initialized"));
+            }
+
             // Construct DB path from source directory
             let db_path = source_dir.join("claris-fuse.db");
 
             // Save mountpoint for cleanup on exit
             let mp_copy = mountpoint.clone();
-                
+
             // Create and mount the passthrough filesystem
             let fs = if read_only {
                 PassthroughFS::new_read_only(db_path, mp_copy.clone())?
@@ -130,12 +162,10 @@ fn main() -> Result<()> {
                 ctrlc::set_handler(move || {
                     info!("Received interrupt signal, unmounting filesystem");
                     // Use fusermount to unmount the filesystem
-                    match Command::new("fusermount")
-                        .arg("-u")
-                        .arg(&mp_copy)
-                        .status() 
-                    {
-                        Ok(status) if status.success() => info!("Successfully unmounted filesystem"),
+                    match Command::new("fusermount").arg("-u").arg(&mp_copy).status() {
+                        Ok(status) if status.success() => {
+                            info!("Successfully unmounted filesystem")
+                        }
                         Ok(status) => error!("Failed to unmount filesystem, exit code: {}", status),
                         Err(e) => error!("Failed to execute unmount command: {}", e),
                     }
@@ -179,6 +209,9 @@ fn main() -> Result<()> {
             }
         }
     }
+
+    // Check for any pending background operations (will be implemented later)
+    // For now, this ensures we don't exit immediately after certain operations
 
     Ok(())
 }

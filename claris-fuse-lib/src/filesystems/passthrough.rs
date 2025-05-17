@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory,
-    ReplyEntry, ReplyOpen, Request,
+    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
+    ReplyOpen, Request,
 };
 use libc::{ENOENT, ENOTDIR, O_APPEND, O_CREAT, O_RDWR, O_WRONLY};
 use log::debug;
@@ -26,21 +26,24 @@ impl PassthroughFS {
     ///
     /// # Errors
     /// Returns an error if the database file is within the mount point directory
-    pub fn new<P: AsRef<Path>, Q: AsRef<Path>>(db_path: P, mount_point: Q) -> std::io::Result<Self> {
+    pub fn new<P: AsRef<Path>, Q: AsRef<Path>>(
+        db_path: P,
+        mount_point: Q,
+    ) -> std::io::Result<Self> {
         let fs = Self {
             db_path: db_path.as_ref().to_path_buf(),
             mount_point: mount_point.as_ref().to_path_buf(),
             read_only: false,
         };
-        
+
         // Check if the database file is inside the mount point
         if fs.is_db_inside_mount_point() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "Database file cannot be inside the mount point directory"
+                "Database file cannot be inside the mount point directory",
             ));
         }
-        
+
         Ok(fs)
     }
 
@@ -50,12 +53,12 @@ impl PassthroughFS {
             Ok(path) => path,
             Err(_) => return false, // Can't determine, assume it's not inside
         };
-        
+
         let mount_point_canon = match std::fs::canonicalize(&self.mount_point) {
             Ok(path) => path,
             Err(_) => return false, // Can't determine, assume it's not inside
         };
-        
+
         db_path_canon.starts_with(mount_point_canon)
     }
 
@@ -68,10 +71,11 @@ impl PassthroughFS {
     pub fn mount_point(&self) -> &Path {
         &self.mount_point
     }
-    
+
     /// Get the source directory (parent directory of the database file)
     fn db_source_dir(&self) -> PathBuf {
-        self.db_path.parent()
+        self.db_path
+            .parent()
             .unwrap_or(Path::new("."))
             .to_path_buf()
     }
@@ -80,7 +84,10 @@ impl PassthroughFS {
     ///
     /// # Errors
     /// Returns an error if the database file is within the mount point directory
-    pub fn new_read_only<P: AsRef<Path>, Q: AsRef<Path>>(db_path: P, mount_point: Q) -> std::io::Result<Self> {
+    pub fn new_read_only<P: AsRef<Path>, Q: AsRef<Path>>(
+        db_path: P,
+        mount_point: Q,
+    ) -> std::io::Result<Self> {
         let mut fs = Self::new(db_path, mount_point)?;
         fs.read_only = true;
         Ok(fs)
@@ -94,19 +101,19 @@ impl PassthroughFS {
     /// Mount the filesystem
     pub fn mount(self) -> std::io::Result<()> {
         let mut options = vec![MountOption::FSName("claris-fuse".to_string())];
-        
+
         if self.read_only {
             options.push(MountOption::RO);
         }
-        
+
         // Check if database file exists
         if !self.db_path.exists() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("Database file not found: {:?}", self.db_path)
+                format!("Database file not found: {:?}", self.db_path),
             ));
         }
-        
+
         // We need to clone mount_point because fuser::mount2 takes ownership of self
         let mount_point = self.mount_point.clone();
         fuser::mount2(self, mount_point, &options)?;
@@ -115,7 +122,8 @@ impl PassthroughFS {
 
     // Helper method to get the real path on the underlying filesystem
     fn real_path(&self, path: &Path) -> PathBuf {
-        self.db_source_dir().join(path.strip_prefix("/").unwrap_or(path))
+        self.db_source_dir()
+            .join(path.strip_prefix("/").unwrap_or(path))
     }
 
     // Helper to convert a file's metadata to FUSE file attributes
@@ -153,19 +161,22 @@ impl PassthroughFS {
 impl Filesystem for PassthroughFS {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         debug!("lookup(parent={}, name={:?})", parent, name);
-        
+
         let parent_path = if parent == 1 {
             PathBuf::from("/")
         } else {
             PathBuf::from(format!("/{}", parent))
         };
-        
+
         let path = parent_path.join(name);
         let real_path = self.real_path(&path);
-        
+
         match fs::metadata(&real_path) {
             Ok(metadata) => {
-                let attr = self.stat_to_fuse_attr(&metadata, path.as_os_str().to_str().unwrap().parse().unwrap_or(2));
+                let attr = self.stat_to_fuse_attr(
+                    &metadata,
+                    path.as_os_str().to_str().unwrap().parse().unwrap_or(2),
+                );
                 reply.entry(&TTL, &attr, 0);
             }
             Err(err) => {
@@ -182,9 +193,9 @@ impl Filesystem for PassthroughFS {
         } else {
             PathBuf::from(format!("/{}", ino))
         };
-        
+
         let real_path = self.real_path(&path);
-        
+
         match fs::metadata(&real_path) {
             Ok(metadata) => {
                 let attr = self.stat_to_fuse_attr(&metadata, ino);
@@ -214,7 +225,7 @@ impl Filesystem for PassthroughFS {
         } else {
             PathBuf::from(format!("/{}", ino))
         };
-        
+
         let real_path = self.real_path(&path);
 
         match File::open(&real_path) {
@@ -257,7 +268,7 @@ impl Filesystem for PassthroughFS {
         } else {
             PathBuf::from(format!("/{}", ino))
         };
-        
+
         let real_path = self.real_path(&path);
 
         if !real_path.is_dir() {
@@ -283,14 +294,15 @@ impl Filesystem for PassthroughFS {
             match entry {
                 Ok(entry) => {
                     let file_name = entry.file_name();
-                    
+
                     // Skip the database file if we're in the root directory
                     if ino == 1 && file_name == self.db_path.file_name().unwrap_or_default() {
                         continue;
                     }
-                    
+
                     let file_path = entry.path();
-                    let entry_ino = file_path.to_str()
+                    let entry_ino = file_path
+                        .to_str()
                         .unwrap_or_default()
                         .parse::<u64>()
                         .unwrap_or_else(|_| (index + 3) as u64);
@@ -338,7 +350,7 @@ impl Filesystem for PassthroughFS {
         } else {
             PathBuf::from(format!("/{}", ino))
         };
-        
+
         let real_path = self.real_path(&path);
 
         let mut options = fs::OpenOptions::new();
