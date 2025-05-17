@@ -46,7 +46,7 @@ claris-fuse init /path/to/directory
 
 # Mount the filesystem
 # The first argument is the database file, the second is the mount point
-claris-fuse mount /path/to/directory/claris-fuse.db /path/to/mount/point
+claris-fuse mount /path/to/initialized/directory /path/to/mount/point
 
 # View version history of a file
 claris-fuse history /path/to/file.txt
@@ -74,7 +74,7 @@ The FUSE driver will be able to work with the database file in the following way
 
 ## Development Status
 
-### Completed
+### In Progress
 - Phase 1: Foundation
   - Initialized Rust workspace with binary and library crates
   - Added fuser dependency for FUSE implementation
@@ -82,7 +82,7 @@ The FUSE driver will be able to work with the database file in the following way
   - Designed storage trait interface for version history
   - Designed SQLite schema for version history storage
 
-### In Progress
+### Planned
 - Phase 2: Core Functionality
   - Implementing SQLite storage backend
   - Adding versioning layer for core operations

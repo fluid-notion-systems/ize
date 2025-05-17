@@ -1,9 +1,11 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use claris_fuse_lib::filesystem::PassthroughFS;
+use claris_fuse_lib::filesystems::passthrough::PassthroughFS;
+use ctrlc;
 use env_logger::Env;
-use log::info;
+use log::{error, info};
 use std::path::PathBuf;
+use std::process::Command;
 
 /// Claris FUSE - Version-Controlled Filesystem
 #[derive(Parser)]
@@ -13,23 +15,67 @@ struct Cli {
     #[arg(long, value_name = "LEVEL")]
     log_level: Option<String>,
 
+    /// Unmount filesystems on exit
+    #[arg(long)]
+    unmount_on_exit: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize a directory for version control (creates claris-fuse.db)
+    Init {
+        /// Directory to initialize for version control
+        #[arg(value_name = "DIRECTORY")]
+        directory: PathBuf,
+    },
+
     /// Mount a filesystem with version control
     Mount {
-        /// Database file path
-        #[arg(value_name = "DB_PATH")]
-        db_path: PathBuf,
+        /// Source directory containing claris-fuse.db
+        #[arg(value_name = "SOURCE_DIR")]
+        source_dir: PathBuf,
 
         /// Mount point directory
         #[arg(value_name = "MOUNTPOINT")]
         mountpoint: PathBuf,
+
+        /// Mount filesystem in read-only mode
+        #[arg(long)]
+        read_only: bool,
     },
-    // More commands will be added later for history, restore, etc.
+
+    /// View version history of a file
+    History {
+        /// Path to the file to show history for
+        #[arg(value_name = "FILE_PATH")]
+        file_path: PathBuf,
+
+        /// Number of versions to show (default: all)
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Show detailed information
+        #[arg(long)]
+        verbose: bool,
+    },
+
+    /// Restore a file to a previous version
+    Restore {
+        /// Path to the file to restore
+        #[arg(value_name = "FILE_PATH")]
+        file_path: PathBuf,
+
+        /// Version to restore to
+        #[arg(long)]
+        version: usize,
+
+        /// Don't prompt for confirmation
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -42,19 +88,95 @@ fn main() -> Result<()> {
     };
     env_logger::init_from_env(env);
 
+    // Set up signal handler for SIGINT if unmount_on_exit is specified
+    let unmount_on_exit = cli.unmount_on_exit;
+
     match cli.command {
+        Commands::Init { directory } => {
+            info!("Initializing directory {:?} for version control", directory);
+
+            // TODO: Implement initialization logic
+            println!("Directory initialization not yet implemented");
+        }
         Commands::Mount {
-            db_path,
+            source_dir,
             mountpoint,
+            read_only,
         } => {
             info!(
-                "Mounting filesystem with database {:?} to mount point {:?}",
-                db_path, mountpoint
+                "Mounting filesystem from {:?} to mount point {:?}{}",
+                source_dir,
+                mountpoint,
+                if read_only { " (read-only)" } else { "" }
             );
 
+            // Construct DB path from source directory
+            let db_path = source_dir.join("claris-fuse.db");
+
+            // Save mountpoint for cleanup on exit
+            let mp_copy = mountpoint.clone();
+                
             // Create and mount the passthrough filesystem
-            let fs = PassthroughFS::new(db_path, mountpoint)?;
+            let fs = if read_only {
+                PassthroughFS::new_read_only(db_path, mp_copy.clone())?
+            } else {
+                PassthroughFS::new(db_path, mp_copy.clone())?
+            };
+
+            if unmount_on_exit {
+                info!("Will unmount filesystem on exit");
+
+                // Set up signal handler for SIGINT and SIGTERM
+                ctrlc::set_handler(move || {
+                    info!("Received interrupt signal, unmounting filesystem");
+                    // Use fusermount to unmount the filesystem
+                    match Command::new("fusermount")
+                        .arg("-u")
+                        .arg(&mp_copy)
+                        .status() 
+                    {
+                        Ok(status) if status.success() => info!("Successfully unmounted filesystem"),
+                        Ok(status) => error!("Failed to unmount filesystem, exit code: {}", status),
+                        Err(e) => error!("Failed to execute unmount command: {}", e),
+                    }
+                    std::process::exit(0);
+                })
+                .expect("Error setting signal handler");
+            }
+
             fs.mount()?;
+        }
+        Commands::History {
+            file_path,
+            limit,
+            verbose,
+        } => {
+            info!("Viewing history for file {:?}", file_path);
+
+            // TODO: Implement history viewing logic
+            println!("File history viewing not yet implemented");
+
+            if verbose {
+                println!("Verbose mode enabled");
+            }
+
+            if let Some(limit_val) = limit {
+                println!("Showing up to {} versions", limit_val);
+            }
+        }
+        Commands::Restore {
+            file_path,
+            version,
+            force,
+        } => {
+            info!("Restoring file {:?} to version {}", file_path, version);
+
+            // TODO: Implement restoration logic
+            println!("File restoration not yet implemented");
+
+            if force {
+                println!("Force mode enabled, skipping confirmation");
+            }
         }
     }
 
