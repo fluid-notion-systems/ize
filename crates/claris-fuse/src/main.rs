@@ -7,8 +7,6 @@ use env_logger::Env;
 use log::{error, info};
 use std::process::Command;
 
-
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
