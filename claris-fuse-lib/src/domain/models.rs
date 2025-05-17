@@ -1,6 +1,6 @@
+use std::convert::TryFrom;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::convert::TryFrom;
 use thiserror::Error;
 
 /// Domain error types for handling errors in the domain layer
@@ -8,21 +8,21 @@ use thiserror::Error;
 pub enum DomainError {
     #[error("Invalid path: {0}")]
     InvalidPath(String),
-    
+
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
-    
+
     #[error("Version not found: {0}")]
     VersionNotFound(u64),
-    
+
     #[error("File not found: {0}")]
     FileNotFound(PathBuf),
-    
+
     #[error("Internal error: {0}")]
     InternalError(String),
 }
 
-/// The type of operation that was performed on a file
+/// The type of operation that was performed on a filesystem
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperationType {
     /// The file was created
@@ -58,24 +58,24 @@ pub enum OperationType {
 impl OperationType {
     /// Returns true if this operation type typically has associated content
     pub fn has_content(&self) -> bool {
-        matches!(self, 
-            OperationType::Create | 
-            OperationType::Write |
-            OperationType::Truncate
+        matches!(
+            self,
+            OperationType::Create | OperationType::Write | OperationType::Truncate
         )
     }
-    
+
     /// Returns true if this operation type changes file metadata
     pub fn changes_metadata(&self) -> bool {
-        matches!(self, 
-            OperationType::Chmod | 
-            OperationType::Chown |
-            OperationType::Utimens |
-            OperationType::SetXattr |
-            OperationType::RemoveXattr
+        matches!(
+            self,
+            OperationType::Chmod
+                | OperationType::Chown
+                | OperationType::Utimens
+                | OperationType::SetXattr
+                | OperationType::RemoveXattr
         )
     }
-    
+
     /// Returns the string representation of this operation type
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -105,7 +105,7 @@ impl std::fmt::Display for OperationType {
 
 impl TryFrom<&str> for OperationType {
     type Error = DomainError;
-    
+
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         match s {
             "Create" => Ok(OperationType::Create),
@@ -132,22 +132,22 @@ impl TryFrom<&str> for OperationType {
 pub struct FileMetadata {
     /// Size of the file in bytes
     pub size: u64,
-    
+
     /// File mode/permissions
     pub mode: u32,
-    
+
     /// Owner user ID
     pub uid: u32,
-    
+
     /// Owner group ID
     pub gid: u32,
-    
+
     /// Last access time
     pub atime: SystemTime,
-    
+
     /// Last modification time
     pub mtime: SystemTime,
-    
+
     /// Last status change time
     pub ctime: SystemTime,
 }
@@ -172,25 +172,25 @@ impl Default for FileMetadata {
 pub struct FileVersion {
     /// Unique identifier for this version
     pub id: u64,
-    
+
     /// Path to the file at the time this version was created
     pub path: PathBuf,
-    
+
     /// Type of operation that created this version
     pub operation_type: OperationType,
-    
+
     /// Timestamp when this version was created
     pub timestamp: SystemTime,
-    
+
     /// Size of the file contents in bytes
     pub size: u64,
-    
+
     /// Optional hash of the file contents
     pub content_hash: Option<String>,
-    
+
     /// Optional description of this version
     pub description: Option<String>,
-    
+
     /// Optional metadata for this version
     pub metadata: Option<FileMetadata>,
 }
@@ -215,42 +215,41 @@ impl FileVersion {
             metadata: None,
         }
     }
-    
+
     /// Returns the elapsed time since this version was created
     pub fn age(&self) -> std::time::Duration {
         SystemTime::now()
             .duration_since(self.timestamp)
             .unwrap_or_else(|_| std::time::Duration::from_secs(0))
     }
-    
+
     /// Returns true if this version is from today
     pub fn is_today(&self) -> bool {
         let now = SystemTime::now();
-        let today_start = now
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() / 86400 * 86400;
-        
-        let version_secs = self.timestamp
+        let today_start =
+            now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() / 86400 * 86400;
+
+        let version_secs = self
+            .timestamp
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        
+
         version_secs >= today_start
     }
-    
+
     /// Sets the content hash for this version
     pub fn with_content_hash(mut self, hash: impl Into<String>) -> Self {
         self.content_hash = Some(hash.into());
         self
     }
-    
+
     /// Sets the description for this version
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
     }
-    
+
     /// Sets the metadata for this version
     pub fn with_metadata(mut self, metadata: FileMetadata) -> Self {
         self.metadata = Some(metadata);
@@ -263,7 +262,7 @@ impl FileVersion {
 pub struct VersionedFile {
     /// Path to the file
     pub path: PathBuf,
-    
+
     /// List of versions, usually sorted by timestamp (newest first)
     pub versions: Vec<FileVersion>,
 }
@@ -276,7 +275,7 @@ impl VersionedFile {
             versions: Vec::new(),
         }
     }
-    
+
     /// Creates a new versioned file with the given path and versions
     pub fn with_versions(path: impl AsRef<Path>, versions: Vec<FileVersion>) -> Self {
         Self {
@@ -284,30 +283,30 @@ impl VersionedFile {
             versions,
         }
     }
-    
+
     /// Adds a version to this file
     pub fn add_version(&mut self, version: FileVersion) {
         self.versions.push(version);
-        
+
         // Keep versions sorted by timestamp (newest first)
         self.versions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     }
-    
+
     /// Returns the latest version of this file, if any
     pub fn latest_version(&self) -> Option<&FileVersion> {
         self.versions.first()
     }
-    
+
     /// Returns the number of versions
     pub fn version_count(&self) -> usize {
         self.versions.len()
     }
-    
+
     /// Returns true if this file has no versions
     pub fn is_empty(&self) -> bool {
         self.versions.is_empty()
     }
-    
+
     /// Returns all versions created after the given timestamp
     pub fn versions_since(&self, timestamp: SystemTime) -> Vec<&FileVersion> {
         self.versions
@@ -315,7 +314,7 @@ impl VersionedFile {
             .filter(|v| v.timestamp >= timestamp)
             .collect()
     }
-    
+
     /// Returns all versions of a specific operation type
     pub fn versions_by_operation(&self, operation_type: OperationType) -> Vec<&FileVersion> {
         self.versions
@@ -330,19 +329,19 @@ impl VersionedFile {
 pub struct FileChange {
     /// Path to the file
     pub path: PathBuf,
-    
+
     /// Type of operation
     pub operation_type: OperationType,
-    
+
     /// Timestamp when the operation occurred
     pub timestamp: SystemTime,
-    
+
     /// File content, if applicable to the operation type
     pub content: Option<Vec<u8>>,
-    
+
     /// File metadata, if applicable
     pub metadata: Option<FileMetadata>,
-    
+
     /// Optional previous path, for rename operations
     pub previous_path: Option<PathBuf>,
 }
@@ -363,30 +362,30 @@ impl FileChange {
             previous_path: None,
         }
     }
-    
+
     /// Sets the content for this change
     pub fn with_content(mut self, content: Vec<u8>) -> Self {
         self.content = Some(content);
         self
     }
-    
+
     /// Sets the metadata for this change
     pub fn with_metadata(mut self, metadata: FileMetadata) -> Self {
         self.metadata = Some(metadata);
         self
     }
-    
+
     /// Sets the previous path for this change (for rename operations)
     pub fn with_previous_path(mut self, previous_path: impl AsRef<Path>) -> Self {
         self.previous_path = Some(previous_path.as_ref().to_path_buf());
         self
     }
-    
+
     /// Returns true if this change has content
     pub fn has_content(&self) -> bool {
         self.content.is_some()
     }
-    
+
     /// Returns the size of the content, or 0 if no content
     pub fn content_size(&self) -> u64 {
         self.content.as_ref().map(|c| c.len() as u64).unwrap_or(0)
@@ -398,22 +397,22 @@ impl FileChange {
 pub struct VersionQuery {
     /// Filter by path prefix
     pub path_prefix: Option<PathBuf>,
-    
+
     /// Filter by timestamp range (start)
     pub since: Option<SystemTime>,
-    
+
     /// Filter by timestamp range (end)
     pub until: Option<SystemTime>,
-    
+
     /// Filter by operation types
     pub operation_types: Option<Vec<OperationType>>,
-    
+
     /// Full-text search query
     pub text_query: Option<String>,
-    
+
     /// Maximum number of results to return
     pub limit: Option<usize>,
-    
+
     /// Number of results to skip
     pub offset: Option<usize>,
 }
@@ -423,55 +422,55 @@ impl VersionQuery {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Sets the path prefix filter
     pub fn with_path_prefix(mut self, prefix: impl AsRef<Path>) -> Self {
         self.path_prefix = Some(prefix.as_ref().to_path_buf());
         self
     }
-    
+
     /// Sets the since timestamp filter
     pub fn with_since(mut self, since: SystemTime) -> Self {
         self.since = Some(since);
         self
     }
-    
+
     /// Sets the until timestamp filter
     pub fn with_until(mut self, until: SystemTime) -> Self {
         self.until = Some(until);
         self
     }
-    
+
     /// Sets the operation types filter
     pub fn with_operation_types(mut self, types: Vec<OperationType>) -> Self {
         self.operation_types = Some(types);
         self
     }
-    
+
     /// Sets the text search query
     pub fn with_text_query(mut self, query: impl Into<String>) -> Self {
         self.text_query = Some(query.into());
         self
     }
-    
+
     /// Sets the result limit
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
         self
     }
-    
+
     /// Sets the result offset
     pub fn with_offset(mut self, offset: usize) -> Self {
         self.offset = Some(offset);
         self
     }
-    
+
     /// Returns true if this query has any filters
     pub fn has_filters(&self) -> bool {
-        self.path_prefix.is_some() || 
-        self.since.is_some() || 
-        self.until.is_some() || 
-        self.operation_types.is_some() ||
-        self.text_query.is_some()
+        self.path_prefix.is_some()
+            || self.since.is_some()
+            || self.until.is_some()
+            || self.operation_types.is_some()
+            || self.text_query.is_some()
     }
 }
