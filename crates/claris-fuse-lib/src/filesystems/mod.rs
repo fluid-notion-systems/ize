@@ -1,3 +1,4 @@
+pub mod error;
 pub mod passthrough;
 
 // We'll add more filesystem implementations here in the future
