@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -9,7 +9,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
     ReplyOpen, Request,
 };
-use libc::{ENOENT, ENOTDIR, O_APPEND, O_CREAT, O_RDWR, O_WRONLY};
+use libc::{mode_t, EACCES, EEXIST, ENOENT, ENOTDIR, O_APPEND, O_CREAT, O_RDWR, O_WRONLY};
 use log::debug;
 
 const TTL: Duration = Duration::from_secs(1); // 1 second
@@ -159,6 +159,190 @@ impl PassthroughFS {
 }
 
 impl Filesystem for PassthroughFS {
+    fn mknod(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        rdev: u32,
+        umask: u32,
+        reply: ReplyEntry,
+    ) {
+        debug!(
+            "mknod(parent={}, name={:?}, mode=0{:o}, rdev={}, umask=0{:o})",
+            parent, name, mode, rdev, umask
+        );
+
+        // Check if filesystem is mounted read-only
+        if self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        let parent_path = if parent == 1 {
+            PathBuf::from("/")
+        } else {
+            PathBuf::from(format!("/{}", parent))
+        };
+
+        let path = parent_path.join(name);
+        let real_path = self.real_path(&path);
+
+        // Check if the file already exists
+        if real_path.exists() {
+            reply.error(EEXIST);
+            return;
+        }
+
+        // Apply umask to mode
+        let mode_with_umask = mode & !umask;
+
+        // Create the file
+        let res = if (mode & libc::S_IFREG) != 0 {
+            // Regular file
+            match File::create(&real_path) {
+                Ok(file) => {
+                    // Set the permissions
+                    let permissions = fs::Permissions::from_mode(mode_with_umask & 0o777);
+                    let _ = file.set_permissions(permissions);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        } else if (mode & libc::S_IFIFO) != 0 {
+            // FIFO (named pipe)
+            nix::unistd::mkfifo(
+                &real_path,
+                nix::sys::stat::Mode::from_bits_truncate(mode_with_umask & 0o777),
+            )
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        } else if (mode & libc::S_IFCHR) != 0 || (mode & libc::S_IFBLK) != 0 {
+            // Character or block device
+            // This requires root privileges and is typically not needed
+            #[cfg(target_os = "linux")]
+            {
+                use nix::sys::stat::{makedev, SFlag};
+
+                let file_type = if (mode & libc::S_IFCHR) != 0 {
+                    SFlag::S_IFCHR
+                } else {
+                    SFlag::S_IFBLK
+                };
+
+                // Combine file type with permissions
+                let mode_bits = (file_type.bits() | (mode_with_umask & 0o777)) as mode_t;
+                let dev = makedev((rdev >> 8) as u64, (rdev & 0xff) as u64);
+
+                // Use the nix system call
+                unsafe {
+                    let ret = libc::mknod(
+                        std::ffi::CString::new(real_path.to_str().unwrap())
+                            .unwrap()
+                            .as_ptr(),
+                        mode_bits,
+                        dev as libc::dev_t,
+                    );
+
+                    if ret == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                }
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "Device creation not supported on this platform",
+                ))
+            }
+        } else {
+            // Unsupported file type
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Unsupported file type",
+            ))
+        };
+
+        match res {
+            Ok(_) => match fs::metadata(&real_path) {
+                Ok(metadata) => {
+                    let attr = self.stat_to_fuse_attr(&metadata, 0);
+                    reply.entry(&TTL, &attr, 0);
+                }
+                Err(e) => {
+                    reply.error(e.raw_os_error().unwrap_or(ENOENT));
+                }
+            },
+            Err(e) => {
+                reply.error(e.raw_os_error().unwrap_or(EACCES));
+            }
+        }
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        reply: ReplyEntry,
+    ) {
+        debug!(
+            "mkdir(parent={}, name={:?}, mode=0{:o}, umask=0{:o})",
+            parent, name, mode, umask
+        );
+
+        // Check if filesystem is mounted read-only
+        if self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        let parent_path = if parent == 1 {
+            PathBuf::from("/")
+        } else {
+            PathBuf::from(format!("/{}", parent))
+        };
+
+        let path = parent_path.join(name);
+        let real_path = self.real_path(&path);
+
+        // Apply umask to mode
+        let mode_with_umask = mode & !umask;
+
+        // Create the directory with specified permissions
+        match fs::create_dir(&real_path) {
+            Ok(_) => {
+                // Set permissions
+                if let Ok(metadata) = fs::metadata(&real_path) {
+                    let mut permissions = metadata.permissions();
+                    permissions.set_mode(mode_with_umask & 0o777);
+                    let _ = fs::set_permissions(&real_path, permissions);
+                }
+
+                // Return directory attributes
+                match fs::metadata(&real_path) {
+                    Ok(metadata) => {
+                        let attr = self.stat_to_fuse_attr(&metadata, 0);
+                        reply.entry(&TTL, &attr, 0);
+                    }
+                    Err(e) => {
+                        reply.error(e.raw_os_error().unwrap_or(ENOENT));
+                    }
+                }
+            }
+            Err(e) => {
+                reply.error(e.raw_os_error().unwrap_or(EACCES));
+            }
+        }
+    }
+
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         debug!("lookup(parent={}, name={:?})", parent, name);
 
