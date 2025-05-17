@@ -1,82 +1,13 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::Parser;
+use claris_fuse_lib::cli::commands::{Cli, Commands};
 use claris_fuse_lib::filesystems::passthrough::PassthroughFS;
 use claris_fuse_lib::storage::StorageManager;
 use env_logger::Env;
 use log::{error, info};
-use std::path::PathBuf;
 use std::process::Command;
 
-/// Claris FUSE - Version-Controlled Filesystem
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
-struct Cli {
-    /// Optional log level (trace, debug, info, warn, error)
-    #[arg(long, value_name = "LEVEL")]
-    log_level: Option<String>,
 
-    /// Unmount filesystems on exit
-    #[arg(long)]
-    unmount_on_exit: bool,
-
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Initialize a directory for version control (creates claris-fuse.db)
-    Init {
-        /// Directory to initialize for version control
-        #[arg(value_name = "DIRECTORY")]
-        directory: PathBuf,
-    },
-
-    /// Mount a filesystem with version control
-    Mount {
-        /// Source directory containing claris-fuse.db
-        #[arg(value_name = "SOURCE_DIR")]
-        source_dir: PathBuf,
-
-        /// Mount point directory
-        #[arg(value_name = "MOUNTPOINT")]
-        mountpoint: PathBuf,
-
-        /// Mount filesystem in read-only mode
-        #[arg(long)]
-        read_only: bool,
-    },
-
-    /// View version history of a file
-    History {
-        /// Path to the file to show history for
-        #[arg(value_name = "FILE_PATH")]
-        file_path: PathBuf,
-
-        /// Number of versions to show (default: all)
-        #[arg(long)]
-        limit: Option<usize>,
-
-        /// Show detailed information
-        #[arg(long)]
-        verbose: bool,
-    },
-
-    /// Restore a file to a previous version
-    Restore {
-        /// Path to the file to restore
-        #[arg(value_name = "FILE_PATH")]
-        file_path: PathBuf,
-
-        /// Version to restore to
-        #[arg(long)]
-        version: usize,
-
-        /// Don't prompt for confirmation
-        #[arg(long)]
-        force: bool,
-    },
-}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();

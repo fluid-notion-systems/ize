@@ -1,5 +1,6 @@
 // pub mod domain;
 // pub mod filesystem;
+pub mod cli;
 pub mod filesystems;
 pub mod storage;
 

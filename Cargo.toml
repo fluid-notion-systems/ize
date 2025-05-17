@@ -1,8 +1,5 @@
 [workspace]
-members = [
-    "claris-fuse",
-    "claris-fuse-lib",
-]
+members = ["claris-fuse", "claris-fuse-lib"]
 resolver = "2"
 
 [workspace.package]
