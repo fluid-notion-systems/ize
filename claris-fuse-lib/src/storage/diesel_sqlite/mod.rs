@@ -193,7 +193,6 @@ impl VersionStorage for DieselSqliteStorage {
         use self::schema::file_paths::dsl::path;
         use self::schema::versions;
 
-
         let mut conn = self.get_conn().await?;
 
         // Run in a transaction
@@ -256,8 +255,10 @@ impl VersionStorage for DieselSqliteStorage {
                 .values(&new_version)
                 .execute(conn)?;
 
-            let version_id: i64 =
-                diesel::select(diesel::dsl::sql::<diesel::sql_types::BigInt>("last_insert_rowid()")).first(conn)?;
+            let version_id: i64 = diesel::select(diesel::dsl::sql::<diesel::sql_types::BigInt>(
+                "last_insert_rowid()",
+            ))
+            .first(conn)?;
 
             // Store content if provided
             if let Some(content_data) = &content {

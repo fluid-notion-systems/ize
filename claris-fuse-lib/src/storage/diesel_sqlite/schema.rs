@@ -38,9 +38,4 @@ diesel::table! {
 diesel::joinable!(contents -> versions (version_id));
 diesel::joinable!(versions -> file_paths (file_path_id));
 
-diesel::allow_tables_to_appear_in_same_query!(
-    contents,
-    file_paths,
-    versions,
-    versions_fts,
-);
+diesel::allow_tables_to_appear_in_same_query!(contents, file_paths, versions, versions_fts,);

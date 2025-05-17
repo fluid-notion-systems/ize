@@ -1,9 +1,9 @@
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use tempfile::tempdir;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::tempdir;
 
 // Define the embedded migrations - would need to be defined differently in real test
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
@@ -14,15 +14,16 @@ fn setup_test_db() -> (SqliteConnection, PathBuf) {
     // Create a temporary directory for our test database
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let db_path = temp_dir.path().join("test.db");
-    
+
     // Create a new SQLite connection
     let mut connection = SqliteConnection::establish(db_path.to_str().unwrap())
         .expect("Failed to create SQLite connection");
-    
+
     // Run migrations to set up the schema
-    connection.run_pending_migrations(MIGRATIONS)
+    connection
+        .run_pending_migrations(MIGRATIONS)
         .expect("Failed to run migrations");
-    
+
     (connection, db_path)
 }
 
@@ -75,11 +76,7 @@ table! {
 joinable!(versions -> file_paths (file_path_id));
 joinable!(contents -> versions (version_id));
 
-allow_tables_to_appear_in_same_query!(
-    file_paths,
-    versions,
-    contents,
-);
+allow_tables_to_appear_in_same_query!(file_paths, versions, contents,);
 
 // Define the model structs
 #[derive(Queryable, Identifiable, Debug, Clone)]
@@ -147,38 +144,38 @@ fn test_create_and_retrieve_file_path() {
     // Skip test if migrations aren't available
     // This test is a placeholder that will always pass
     // In a real test you'd use real migrations
-    
+
     // To test with an actual database, you'd uncomment this code:
     /*
     let (mut conn, db_path) = setup_test_db();
-    
+
     // Create a new file path entry
     let now = get_unix_timestamp();
-    
+
     let new_file_path = NewDbFilePath {
         path: "/test/path/file.txt",
         created_at: now,
         last_modified: now,
     };
-    
+
     // Insert the file path
     let file_path_id = diesel::insert_into(file_paths::table)
         .values(&new_file_path)
         .returning(file_paths::id)
         .get_result::<i64>(&mut conn)
         .expect("Failed to insert file path");
-    
+
     // Retrieve the file path
     let retrieved_file_path = file_paths::table
         .find(file_path_id)
         .first::<DbFilePath>(&mut conn)
         .expect("Failed to retrieve file path");
-    
+
     // Verify the retrieved file path
     assert_eq!(retrieved_file_path.path, "/test/path/file.txt");
     assert_eq!(retrieved_file_path.created_at, now);
     assert_eq!(retrieved_file_path.last_modified, now);
-    
+
     // Clean up the test database
     cleanup(db_path);
     */
@@ -188,14 +185,14 @@ fn test_create_and_retrieve_file_path() {
 fn test_diesel_model_structure() {
     // This test verifies that our model structs compile correctly
     // It doesn't test database interaction, just that the models are structured properly
-    
+
     let file_path = DbFilePath {
         id: 1,
         path: "/test/path/file.txt".to_string(),
         created_at: 1234567890,
         last_modified: 1234567890,
     };
-    
+
     let version = DbVersion {
         id: 1,
         file_path_id: 1,
@@ -205,12 +202,12 @@ fn test_diesel_model_structure() {
         content_hash: Some("hash123".to_string()),
         description: Some("Test version".to_string()),
     };
-    
+
     let content = DbContent {
         version_id: 1,
         data: b"test data".to_vec(),
     };
-    
+
     assert_eq!(file_path.id, 1);
     assert_eq!(version.file_path_id, file_path.id);
     assert_eq!(content.version_id, version.id);

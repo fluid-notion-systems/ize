@@ -18,7 +18,7 @@ impl SqliteSchema {
             )",
             [],
         )?;
-        
+
         // Index on path for quick lookups
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_file_paths_path ON file_paths(path);",
@@ -39,23 +39,23 @@ impl SqliteSchema {
             )",
             [],
         )?;
-        
+
         // Indexes for common queries
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_versions_file_path_id ON versions(file_path_id);",
             [],
         )?;
-        
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_versions_timestamp ON versions(timestamp);",
             [],
         )?;
-        
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_versions_operation_type ON versions(operation_type);",
             [],
         )?;
-        
+
         // Create full-text search index for description searches when using AI descriptions
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS versions_fts USING fts5(
@@ -64,7 +64,7 @@ impl SqliteSchema {
             );",
             [],
         )?;
-        
+
         // Create contents table to store file contents
         conn.execute(
             "CREATE TABLE IF NOT EXISTS contents (
@@ -74,7 +74,7 @@ impl SqliteSchema {
             )",
             [],
         )?;
-        
+
         // Create trigger to update file_paths.last_modified when versions are added
         conn.execute(
             "CREATE TRIGGER IF NOT EXISTS update_file_last_modified
@@ -86,7 +86,7 @@ impl SqliteSchema {
             END;",
             [],
         )?;
-        
+
         // Create trigger to add entries to versions_fts when descriptions are added
         conn.execute(
             "CREATE TRIGGER IF NOT EXISTS update_versions_fts
@@ -97,7 +97,7 @@ impl SqliteSchema {
             END;",
             [],
         )?;
-        
+
         // Create trigger to update entries in versions_fts when descriptions are updated
         conn.execute(
             "CREATE TRIGGER IF NOT EXISTS update_versions_fts_description
@@ -108,7 +108,7 @@ impl SqliteSchema {
             END;",
             [],
         )?;
-        
+
         // Create trigger to remove entries from versions_fts when versions are deleted
         conn.execute(
             "CREATE TRIGGER IF NOT EXISTS delete_versions_fts
@@ -118,7 +118,7 @@ impl SqliteSchema {
             END;",
             [],
         )?;
-        
+
         // Create configuration table for retention policies
         conn.execute(
             "CREATE TABLE IF NOT EXISTS config (
@@ -127,18 +127,18 @@ impl SqliteSchema {
             )",
             [],
         )?;
-        
+
         // Insert default configuration
         conn.execute(
             "INSERT OR IGNORE INTO config (key, value) VALUES ('retention_days', '30')",
             [],
         )?;
-        
+
         conn.execute(
             "INSERT OR IGNORE INTO config (key, value) VALUES ('max_versions_per_file', '100')",
             [],
         )?;
-        
+
         Ok(())
     }
 }

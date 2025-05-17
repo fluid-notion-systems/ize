@@ -1,6 +1,6 @@
-use diesel::prelude::*;
-use chrono::{DateTime, Utc};
 use super::schema::*;
+use chrono::{DateTime, Utc};
+use diesel::prelude::*;
 
 /// Database model that directly maps to the file_paths table
 #[derive(Queryable, Identifiable, Debug, Clone)]

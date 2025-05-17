@@ -1,9 +1,9 @@
-use std::path::PathBuf;
-use clap::{Parser, Subcommand};
 use anyhow::Result;
+use clap::{Parser, Subcommand};
+use claris_fuse_lib::filesystem::PassthroughFS;
 use env_logger::Env;
 use log::info;
-use claris_fuse_lib::filesystem::PassthroughFS;
+use std::path::PathBuf;
 
 /// Claris FUSE - Version-Controlled Filesystem
 #[derive(Parser)]
@@ -43,9 +43,15 @@ fn main() -> Result<()> {
     env_logger::init_from_env(env);
 
     match cli.command {
-        Commands::Mount { db_path, mountpoint } => {
-            info!("Mounting filesystem with database {:?} to mount point {:?}", db_path, mountpoint);
-            
+        Commands::Mount {
+            db_path,
+            mountpoint,
+        } => {
+            info!(
+                "Mounting filesystem with database {:?} to mount point {:?}",
+                db_path, mountpoint
+            );
+
             // Create and mount the passthrough filesystem
             let fs = PassthroughFS::new(db_path, mountpoint)?;
             fs.mount()?;

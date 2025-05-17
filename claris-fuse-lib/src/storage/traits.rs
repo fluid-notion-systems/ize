@@ -150,7 +150,7 @@ pub trait VersionStorage: StorageBackend {
         operation_type: OperationType,
         content: Option<Vec<u8>>,
     ) -> StorageResult<i64>;
-    
+
     /// Get all versions of a file
     async fn get_file_versions(&self, path: &Path) -> StorageResult<VersionedFile>;
 

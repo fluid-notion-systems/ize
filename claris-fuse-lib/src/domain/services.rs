@@ -1,18 +1,18 @@
+use async_trait::async_trait;
 use std::path::Path;
 use std::time::SystemTime;
-use async_trait::async_trait;
 
 use super::models::{
-    FileChange, FileMetadata, FileVersion, VersionedFile, VersionQuery, OperationType,
+    FileChange, FileMetadata, FileVersion, OperationType, VersionQuery, VersionedFile,
 };
-use super::repositories::{VersionRepository, SearchableVersionRepository, RepositoryResult};
+use super::repositories::{RepositoryResult, SearchableVersionRepository, VersionRepository};
 
 /// Service for managing file versions
 #[async_trait]
 pub trait VersionService: Send + Sync {
     /// Initialize the version service
     async fn init(&self) -> RepositoryResult<()>;
-    
+
     /// Create a new version of a file
     async fn create_version(
         &self,
@@ -21,29 +21,29 @@ pub trait VersionService: Send + Sync {
         content: Option<Vec<u8>>,
         metadata: Option<FileMetadata>,
     ) -> RepositoryResult<u64>;
-    
+
     /// Get all versions of a file
     async fn get_file_history(
         &self,
         path: impl AsRef<Path> + Send,
     ) -> RepositoryResult<VersionedFile>;
-    
+
     /// Get a specific version by ID
     async fn get_version(&self, version_id: u64) -> RepositoryResult<FileVersion>;
-    
+
     /// Get the content of a specific version
     async fn get_version_content(&self, version_id: u64) -> RepositoryResult<Option<Vec<u8>>>;
-    
+
     /// Find versions matching query parameters
     async fn find_versions(&self, query: &VersionQuery) -> RepositoryResult<Vec<FileVersion>>;
-    
+
     /// Update a version's description
     async fn update_description(
         &self,
         version_id: u64,
         description: String,
     ) -> RepositoryResult<()>;
-    
+
     /// Delete a version
     async fn delete_version(&self, version_id: u64) -> RepositoryResult<()>;
 }
@@ -58,7 +58,7 @@ impl DefaultVersionService {
     pub fn new(repository: Box<dyn VersionRepository>) -> Self {
         Self { repository }
     }
-    
+
     /// Get the underlying repository
     pub fn repository(&self) -> &dyn VersionRepository {
         self.repository.as_ref()
@@ -70,7 +70,7 @@ impl VersionService for DefaultVersionService {
     async fn init(&self) -> RepositoryResult<()> {
         self.repository.init().await
     }
-    
+
     async fn create_version(
         &self,
         path: impl AsRef<Path> + Send,
@@ -86,37 +86,39 @@ impl VersionService for DefaultVersionService {
             metadata,
             previous_path: None,
         };
-        
+
         self.repository.save_version(change).await
     }
-    
+
     async fn get_file_history(
         &self,
         path: impl AsRef<Path> + Send,
     ) -> RepositoryResult<VersionedFile> {
         self.repository.get_file_versions(path.as_ref()).await
     }
-    
+
     async fn get_version(&self, version_id: u64) -> RepositoryResult<FileVersion> {
         self.repository.get_version(version_id).await
     }
-    
+
     async fn get_version_content(&self, version_id: u64) -> RepositoryResult<Option<Vec<u8>>> {
         self.repository.get_version_content(version_id).await
     }
-    
+
     async fn find_versions(&self, query: &VersionQuery) -> RepositoryResult<Vec<FileVersion>> {
         self.repository.query_versions(query).await
     }
-    
+
     async fn update_description(
         &self,
         version_id: u64,
         description: String,
     ) -> RepositoryResult<()> {
-        self.repository.update_version_description(version_id, description).await
+        self.repository
+            .update_version_description(version_id, description)
+            .await
     }
-    
+
     async fn delete_version(&self, version_id: u64) -> RepositoryResult<()> {
         self.repository.delete_version(version_id).await
     }
@@ -127,20 +129,20 @@ impl VersionService for DefaultVersionService {
 pub trait SearchService: Send + Sync {
     /// Search for versions based on description text
     async fn search_by_text(&self, query: &str) -> RepositoryResult<Vec<FileVersion>>;
-    
+
     /// Find versions created within a time period
     async fn find_versions_by_time(
         &self,
         since: SystemTime,
         until: Option<SystemTime>,
     ) -> RepositoryResult<Vec<FileVersion>>;
-    
+
     /// Find versions by operation type
     async fn find_versions_by_operation(
         &self,
         operation_type: OperationType,
     ) -> RepositoryResult<Vec<FileVersion>>;
-    
+
     /// Find versions matching a path pattern
     async fn find_versions_by_path_pattern(
         &self,
@@ -158,7 +160,7 @@ impl DefaultSearchService {
     pub fn new(repository: Box<dyn SearchableVersionRepository>) -> Self {
         Self { repository }
     }
-    
+
     /// Get the underlying repository
     pub fn repository(&self) -> &dyn SearchableVersionRepository {
         self.repository.as_ref()
@@ -170,23 +172,27 @@ impl SearchService for DefaultSearchService {
     async fn search_by_text(&self, query: &str) -> RepositoryResult<Vec<FileVersion>> {
         self.repository.search_by_description(query).await
     }
-    
+
     async fn find_versions_by_time(
         &self,
         since: SystemTime,
         until: Option<SystemTime>,
     ) -> RepositoryResult<Vec<FileVersion>> {
         let until = until.unwrap_or_else(SystemTime::now);
-        self.repository.get_versions_in_timerange(since, until).await
+        self.repository
+            .get_versions_in_timerange(since, until)
+            .await
     }
-    
+
     async fn find_versions_by_operation(
         &self,
         operation_type: OperationType,
     ) -> RepositoryResult<Vec<FileVersion>> {
-        self.repository.get_versions_by_operation(operation_type).await
+        self.repository
+            .get_versions_by_operation(operation_type)
+            .await
     }
-    
+
     async fn find_versions_by_path_pattern(
         &self,
         pattern: &str,
@@ -199,7 +205,7 @@ impl SearchService for DefaultSearchService {
 pub trait ServiceFactory: Send + Sync {
     /// Create a version service
     fn create_version_service(&self) -> DefaultVersionService;
-    
+
     /// Create a search service
     fn create_search_service(&self) -> Box<dyn SearchService>;
 }

@@ -1,13 +1,13 @@
-mod traits;
-mod sqlite_schema;
-mod sqlite;
 pub mod diesel_sqlite;
 pub mod models;
+mod sqlite;
+mod sqlite_schema;
+mod traits;
 
 pub use traits::{
-    FileVersion, OperationType, StorageError, StorageFactory, StorageResult, VersionStorage,
-    VersionedFile, StorageBackend, SearchableStorage, SearchableStorageFactory,
+    FileVersion, OperationType, SearchableStorage, SearchableStorageFactory, StorageBackend,
+    StorageError, StorageFactory, StorageResult, VersionStorage, VersionedFile,
 };
 
-pub use sqlite_schema::SqliteSchema;
 pub use sqlite::{SqliteStorage, SqliteStorageFactory};
+pub use sqlite_schema::SqliteSchema;
