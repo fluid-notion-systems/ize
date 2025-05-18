@@ -19,6 +19,10 @@ Claris-FUSE is a FUSE filesystem implementation in Rust that maintains a linear 
   - SQLite as default implementation
   - Interface for creating custom storage engines
   - Easy to swap implementations as performance needs change
+- **Command Queue System**: Asynchronous processing of filesystem operations
+  - In-memory queue for efficient operation handling
+  - Background thread for database persistence
+  - Maintains system performance while capturing history
 
 ### Key Features (Implemented and Planned)
 1. **Implemented**:
@@ -30,6 +34,7 @@ Claris-FUSE is a FUSE filesystem implementation in Rust that maintains a linear 
    - Command-line interface for all operations
 
 2. **Planned**:
+   - Asynchronous command queue architecture for performance
    - Transparent versioning of all file operations
    - Ability to view file history
    - Restoring files to previous versions
@@ -39,14 +44,40 @@ Claris-FUSE is a FUSE filesystem implementation in Rust that maintains a linear 
    - Extended search capabilities through file history
 
 ## Implementation Approach
-1. Use the fuser crate to implement core FUSE functionality
-2. Intercept file operations (create, write, delete, etc.)
-3. Store metadata about changes with timestamps
-4. Define storage trait interface for version history
+1. Use the fuser crate to implement core FUSE functionality with PassthroughFS
+2. Intercept file operations (create, write, delete, etc.) and add to command queue
+3. Process command queue asynchronously to store history in database
+4. Define storage trait interface for version history and command persistence
 5. Implement SQLite backend as default storage engine
 6. Provide API for browsing and restoring history
 7. Allow for alternative storage backends to be implemented and plugged in
 8. Integrate with LLM API for generating descriptive change summaries
+
+### Implementation Phases
+
+#### Phase 1: Foundation (Completed)
+- Implement PassthroughFS with robust file operations
+- Create path management system for consistent handling
+- Develop command-line interface for basic operations
+- Set up database schema and storage interface
+
+#### Phase 2: Command Queue System (Current)
+- Design command representations for filesystem operations
+- Implement thread-safe command queue with Arc<Mutex<Queue>>
+- Create background worker thread for async processing
+- Develop serialization/deserialization for commands
+
+#### Phase 3: History Tracking
+- Implement versioning layer on top of PassthroughFS
+- Store command history in SQLite database
+- Create APIs for retrieving version history
+- Implement file restoration functionality
+
+#### Phase 4: Advanced Features
+- Implement delta storage for efficient history
+- Add AI-powered commit messages for changes
+- Develop extended search capabilities
+- Create configurable retention policies
 
 ## Usage Examples
 ```bash
@@ -73,6 +104,24 @@ The `mount` command requires two parameters: the path to the initialized directo
 
 ## System Architecture
 
+### Command Queue Subsystem
+The command queue subsystem is designed to efficiently capture filesystem operations while maintaining performance:
+
+1. **Command Structure**: Represents filesystem operations:
+   - Encapsulates operation type (write, create, delete, etc.)
+   - Includes metadata (timestamps, file paths, etc.)
+   - Serializable for storage
+
+2. **Queue Manager**: Handles in-memory command processing:
+   - Thread-safe queue using Arc<Mutex<Queue<Command>>>
+   - Background worker thread for database persistence
+   - Batching for efficient storage operations
+
+3. **Command Consumer**: Processes commands asynchronously:
+   - Reads from command queue
+   - Persists changes to storage backend
+   - Handles error recovery and retry logic
+
 ### Storage Subsystem
 The storage subsystem is designed with a trait-based approach to allow for multiple backend implementations:
 
@@ -80,6 +129,7 @@ The storage subsystem is designed with a trait-based approach to allow for multi
    - `read` - Read data from storage
    - `write` - Write data to storage
    - `delete` - Delete data from storage
+   - `store_command` - Store a command in the history
 
 2. **StorageManager**: Static methods for initializing, validating, and opening storage:
    - `init` - Initialize a new database in the specified directory
@@ -94,20 +144,29 @@ The storage subsystem is designed with a trait-based approach to allow for multi
 ### Database Schema
 The SQLite schema is designed to efficiently track file and directory history:
 
-1. **Directories**:
+1. **Commands**:
+   - `id`: BigInt (Primary Key)
+   - `command_type`: Text (e.g., "write", "create", "delete")
+   - `path`: Text (Relative path of affected file/directory)
+   - `timestamp`: BigInt (Unix timestamp)
+   - `parent_command_id`: BigInt (Optional, for linking related commands)
+   - `metadata`: Text (JSON-serialized command metadata)
+   - `content_id`: BigInt (Foreign Key to Content, if applicable)
+
+2. **Directories**:
    - `id`: BigInt (Primary Key)
    - `path`: Text (Unique)
    - `created_at`: BigInt (Unix timestamp)
    - `metadata_id`: Foreign Key to Metadata
 
-2. **Files**:
+3. **Files**:
    - `id`: BigInt (Primary Key)
    - `directory_id`: BigInt (Foreign Key to Directory)
    - `name`: Text
    - `created_at`: BigInt (Unix timestamp)
    - `metadata_id`: BigInt (Foreign Key to Metadata)
 
-3. **Metadata** (shared between files and directories):
+4. **Metadata** (shared between files and directories):
    - `id`: BigInt (Primary Key)
    - `mode`: Integer (File permissions)
    - `uid`: Integer (User ID)
@@ -116,24 +175,32 @@ The SQLite schema is designed to efficiently track file and directory history:
    - `mtime`: BigInt (Modification time)
    - `ctime`: BigInt (Change time - when metadata or content was last changed)
 
-4. **Content**:
+5. **Content**:
    - `id`: BigInt (Primary Key)
    - `file_id`: BigInt (Foreign Key to File)
    - `data`: Binary (The actual file content as raw bytes)
 
 ### Filesystem Implementation
-The PassthroughFS implementation provides base filesystem functionality:
+The implementation consists of two main layers:
 
-1. **Core Features**:
+1. **PassthroughFS Layer**:
    - Transparent file and directory operations
    - Read-only mode support
    - Database path validation
    - Hiding the database file from the mounted view
+   - Path management for consistent handling of special cases
 
-2. **Extension Points**:
-   - Hooks for version tracking in all write operations
-   - Integration points for storing file changes
-   - Support for metadata operations
+2. **VersionedFS Layer**:
+   - Wraps PassthroughFS to intercept operations
+   - Queues commands for asynchronous processing
+   - Delegates actual filesystem operations to PassthroughFS
+   - Minimal performance impact on filesystem operations
+
+3. **Command Processing Layer**:
+   - Background thread for processing command queue
+   - Batches commands for efficient storage
+   - Handles persistence to database
+   - Manages error recovery and retry logic
 
 ### Command Line Interface
 The CLI is implemented using clap with the following commands:
@@ -172,13 +239,16 @@ The CLI is implemented using clap with the following commands:
 - Signal handling for clean unmounting
 
 ### In Progress
-- Implementing version tracking layer on top of passthrough filesystem
-- History command implementation
-- File restoration functionality
+- Designing command queue architecture for asynchronous history tracking
+- Creating command representations for various filesystem operations
+- Implementing thread-safe queue with background worker thread
+- Developing efficient serialization/deserialization of filesystem commands
 - Optimizing performance for large files and directories
 
 ### Planned
-- Metadata-only changes tracking
+- Version tracking layer implementation on top of passthrough
+- History command implementation
+- File restoration functionality
 - Delta storage for efficient version history
 - Extended search capabilities
 - Configuration options for retention policies
@@ -220,6 +290,14 @@ The following FUSE filesystem operations will need to be implemented and tracked
 10. **flush/fsync/release** - Managing file handles
 
 ## Future Enhancements
+
+### Command Queue Optimization
+For high-performance filesystem history tracking:
+1. Implement batching of similar operations
+2. Add prioritization for different command types
+3. Develop adaptive persistence strategies based on system load
+4. Implement command compression for large batches
+5. Add conflict resolution for overlapping operations
 
 ### AI-Powered Change Descriptions
 For meaningful file change descriptions:
