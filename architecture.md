@@ -20,9 +20,11 @@ Claris-FUSE is a FUSE filesystem implementation in Rust that maintains a linear 
   - Interface for creating custom storage engines
   - Easy to swap implementations as performance needs change
 
-## Key Features (Implemented and Planned)
+### Key Features (Implemented and Planned)
 1. **Implemented**:
-   - Transparent filesystem passthrough
+   - Robust transparent filesystem passthrough
+   - Path management with consistent handling of special cases
+   - Support for complex applications in mounted filesystem
    - Database initialization and validation
    - Read-only mode support
    - Command-line interface for all operations
@@ -157,7 +159,12 @@ The CLI is implemented using clap with the following commands:
 ## Development Status
 
 ### Completed
-- Basic FUSE filesystem implementation
+- Robust FUSE passthrough filesystem implementation
+  - Support for standard file operations (read, write, create, delete)
+  - Directory creation and removal
+  - File renaming and moving
+  - Complex application support (tested with Zed editor)
+- Advanced path management with consistent handling
 - Database schema design
 - Storage trait interface and SQLite implementation
 - Directory initialization command
@@ -165,9 +172,10 @@ The CLI is implemented using clap with the following commands:
 - Signal handling for clean unmounting
 
 ### In Progress
-- Version tracking for file operations
+- Implementing version tracking layer on top of passthrough filesystem
 - History command implementation
 - File restoration functionality
+- Optimizing performance for large files and directories
 
 ### Planned
 - Metadata-only changes tracking
