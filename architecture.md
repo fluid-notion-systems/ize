@@ -231,10 +231,24 @@ To optimize storage use for large files:
 4. Provide configuration for compression and retention policies
 5. Support pruning of historical versions based on age or space constraints
 
-## Commit Guidelines
+## Development Workflow & Practices
+
+### Commit Guidelines
 
 - Make atomic commits that focus on a single logical change
 - Write descriptive commit messages explaining the "why" not just the "what"
 - Include references to any research or decisions made
 - Keep commits small and focused to make code review easier
 - For large features, break them down into multiple sequential commits
+
+### Code Quality Tools
+
+#### Husky and Pre-commit Hooks
+
+The project uses Husky to manage Git hooks, particularly pre-commit hooks, which:
+- Run Clippy (Rust linter) to catch common mistakes and enforce code style
+- Run the test suite to ensure nothing breaks
+- Format code using rustfmt to maintain consistent styling
+- Validate commit messages against project standards
+
+This automated validation ensures that all committed code meets the project's quality standards before it reaches the repository.

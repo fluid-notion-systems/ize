@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
@@ -19,6 +17,7 @@ use libc::{
 use log::{debug, error, info, warn};
 
 use super::error::{FsError, FsErrorCode, IoErrorExt};
+use super::path_manager::{PathForm, PathManager, ROOT_INODE};
 
 const TTL: Duration = Duration::from_secs(1); // 1 second
 
@@ -27,12 +26,8 @@ pub struct PassthroughFS {
     db_path: PathBuf,
     mount_point: PathBuf,
     read_only: bool,
-    // Map from inode numbers to paths (relative to source dir)
-    inode_map: HashMap<u64, PathBuf>,
-    // Map from paths to inode numbers
-    path_map: HashMap<PathBuf, u64>,
-    // Counter for generating new inode numbers
-    next_inode: AtomicU64,
+    // Path manager for handling paths and inodes
+    path_manager: PathManager,
 }
 
 impl PassthroughFS {
@@ -44,13 +39,15 @@ impl PassthroughFS {
         db_path: P,
         mount_point: Q,
     ) -> std::io::Result<Self> {
-        let mut fs = Self {
-            db_path: db_path.as_ref().to_path_buf(),
-            mount_point: mount_point.as_ref().to_path_buf(),
+        let db_path = db_path.as_ref().to_path_buf();
+        let mount_point = mount_point.as_ref().to_path_buf();
+        
+        // Create file system with path manager
+        let fs = Self {
+            db_path: db_path.clone(),
+            mount_point: mount_point.clone(),
             read_only: false,
-            inode_map: HashMap::new(),
-            path_map: HashMap::new(),
-            next_inode: AtomicU64::new(2), // Start from 2, 1 is reserved for root
+            path_manager: PathManager::new(db_path.parent().unwrap_or_else(|| Path::new("."))),
         };
 
         // Check if the database file is inside the mount point
@@ -60,10 +57,6 @@ impl PassthroughFS {
                 "Database file cannot be inside the mount point directory",
             ));
         }
-
-        // Initialize the root directory with inode 1
-        fs.inode_map.insert(1, PathBuf::from(""));
-        fs.path_map.insert(PathBuf::from(""), 1);
 
         info!(
             "Initialized PassthroughFS with source dir: {:?}",
@@ -116,7 +109,6 @@ impl PassthroughFS {
     ) -> std::io::Result<Self> {
         let mut fs = Self::new(db_path, mount_point)?;
         fs.read_only = true;
-        info!("Setting filesystem to read-only mode");
         Ok(fs)
     }
 
@@ -148,37 +140,22 @@ impl PassthroughFS {
     }
 
     // Helper method to get the real path on the underlying filesystem
+    /// Converts the virtual path to a real path in the source directory.
     pub fn real_path(&self, path: &Path) -> PathBuf {
-        let clean_path = path.strip_prefix("/").unwrap_or(path);
-        let result = self.db_source_dir().join(clean_path);
-        debug!(
-            "Translating virtual path {:?} to real path {:?}",
-            path, result
-        );
-        result
+        self.path_manager.get_real_path(path)
     }
-
-    // Get an inode number for a path, creating a new one if needed
+    
+    // Helper functions that delegate to PathManager
+    
+    // Delegating these functions to PathManager to maintain backward compatibility
+    // with existing code - in the future, they can be removed in favor of direct calls
     fn get_inode_for_path(&mut self, path: &Path) -> u64 {
-        // Ensure we're using a relative path (no leading slash)
-        let rel_path = path.strip_prefix("/").unwrap_or(path).to_path_buf();
-
-        if let Some(&ino) = self.path_map.get(&rel_path) {
-            return ino;
-        }
-
-        let ino = self.next_inode.fetch_add(1, Ordering::SeqCst);
-        self.path_map.insert(rel_path.clone(), ino);
-        self.inode_map.insert(ino, rel_path);
-        ino
+        self.path_manager.get_or_create_inode(path)
     }
-
+    
     // Get a path for an inode number
     fn get_path_for_inode(&self, ino: u64) -> Option<PathBuf> {
-        if ino == 1 {
-            return Some(PathBuf::from("/"));
-        }
-        self.inode_map.get(&ino).cloned()
+        self.path_manager.get_path(ino)
     }
 
     // Helper to convert a file's metadata to FUSE file attributes
@@ -415,15 +392,14 @@ impl Filesystem for PassthroughFS {
             return;
         }
 
-        // Construct path based on parent inode
-        let path = if parent == 1 {
-            PathBuf::from("/").join(name)
-        } else if let Some(parent_rel_path) = self.inode_map.get(&parent) {
-            PathBuf::from("/").join(parent_rel_path).join(name)
-        } else {
-            error!("unlink: parent inode {} not found in inode map", parent);
-            reply.error(libc::ENOENT);
-            return;
+        // Construct path using PathManager
+        let path = match self.path_manager.build_path(parent, Path::new(name)) {
+            Some(p) => p,
+            None => {
+                error!("unlink: parent inode {} not found in path manager", parent);
+                reply.error(libc::ENOENT);
+                return;
+            }
         };
         let real_path = self.real_path(&path);
 
@@ -432,19 +408,9 @@ impl Filesystem for PassthroughFS {
         // Remove the file
         match fs::remove_file(&real_path) {
             Ok(_) => {
-                // Remove from inode mapping if applicable
-                let rel_path = path.strip_prefix("/").unwrap_or(&path).to_path_buf();
-                // Find the inode for this path first, then remove it
-                let inode_to_remove = if let Some(&ino) = self.path_map.get(&rel_path) {
-                    Some(ino)
-                } else {
-                    None
-                };
-
-                if let Some(ino) = inode_to_remove {
-                    self.inode_map.remove(&ino);
-                    self.path_map.remove(&rel_path);
-                    debug!("unlink: removed inode {} for path {:?}", ino, rel_path);
+                // Remove path from PathManager
+                if let Some(ino) = self.path_manager.remove_path(&path) {
+                    debug!("unlink: removed inode {} for path {:?}", ino, path);
                 }
 
                 reply.ok();
@@ -484,17 +450,15 @@ impl Filesystem for PassthroughFS {
             return;
         }
 
-        // Get the path for this inode
-        let path = match self.get_path_for_inode(ino) {
-            Some(p) => p,
+        // Get the path from inode using PathManager
+        let real_path = match self.path_manager.get_path(ino) {
+            Some(path) => self.path_manager.get_real_path(&path),
             None => {
                 error!("write: inode {} not found in map", ino);
-                reply.error(libc::ENOENT);
+                reply.error(ENOENT);
                 return;
             }
         };
-
-        let real_path = self.real_path(&path);
 
         // Use Rust's File API instead of raw file descriptors
         // This avoids issues with stale file handles after operations like truncate
@@ -552,15 +516,14 @@ impl Filesystem for PassthroughFS {
             return;
         }
 
-        // Construct path based on parent inode
-        let path = if parent == 1 {
-            PathBuf::from("/").join(name)
-        } else if let Some(parent_rel_path) = self.inode_map.get(&parent) {
-            PathBuf::from("/").join(parent_rel_path).join(name)
-        } else {
-            error!("rmdir: parent inode {} not found in inode map", parent);
-            reply.error(libc::ENOENT);
-            return;
+        // Construct path using PathManager
+        let path = match self.path_manager.build_path(parent, Path::new(name)) {
+            Some(p) => p,
+            None => {
+                error!("rmdir: parent inode {} not found in path manager", parent);
+                reply.error(libc::ENOENT);
+                return;
+            }
         };
         let real_path = self.real_path(&path);
 
@@ -569,19 +532,9 @@ impl Filesystem for PassthroughFS {
         // Remove the directory
         match fs::remove_dir(&real_path) {
             Ok(_) => {
-                // Remove from inode mapping if applicable
-                let rel_path = path.strip_prefix("/").unwrap_or(&path).to_path_buf();
-                // Find the inode for this path first, then remove it
-                let inode_to_remove = if let Some(&ino) = self.path_map.get(&rel_path) {
-                    Some(ino)
-                } else {
-                    None
-                };
-
-                if let Some(ino) = inode_to_remove {
-                    self.inode_map.remove(&ino);
-                    self.path_map.remove(&rel_path);
-                    debug!("rmdir: removed inode {} for path {:?}", ino, rel_path);
+                // Remove path from PathManager
+                if let Some(ino) = self.path_manager.remove_path(&path) {
+                    debug!("rmdir: removed inode {} for path {:?}", ino, path);
                 }
 
                 reply.ok();
@@ -835,30 +788,15 @@ impl Filesystem for PassthroughFS {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         debug!("lookup(parent={}, name={:?})", parent, name);
 
-        // Special case for root directory
-        if parent == 1 && !self.path_map.contains_key(&PathBuf::from("")) {
-            // Make sure root is in our maps
-            self.inode_map.insert(1, PathBuf::from(""));
-            self.path_map.insert(PathBuf::from(""), 1);
-        }
-
-        // Get parent path from inode
-        let parent_path_buf = match self.get_path_for_inode(parent) {
+        // Build path from parent inode and name
+        let name_path = Path::new(name);
+        let path = match self.path_manager.build_path(parent, name_path) {
             Some(p) => p,
             None => {
                 error!("lookup: parent inode {} not found in map", parent);
                 reply.error(ENOENT);
                 return;
             }
-        };
-
-        // Construct the path to lookup - make sure all paths are treated consistently
-        let path = if parent == 1 || parent_path_buf.as_os_str().is_empty() {
-            // Root directory
-            PathBuf::from("/").join(name)
-        } else {
-            // Non-root directory
-            PathBuf::from("/").join(&parent_path_buf).join(name)
         };
 
         debug!("lookup: constructed virtual path {:?}", path);
@@ -869,8 +807,8 @@ impl Filesystem for PassthroughFS {
         match fs::metadata(&real_path) {
             Ok(metadata) => {
                 // Get or create inode for this path
-                let rel_path = path.strip_prefix("/").unwrap_or(&path).to_path_buf();
-                let ino = self.get_inode_for_path(&rel_path);
+                let rel_path = self.path_manager.transform_path(&path, PathForm::Relative);
+                let ino = self.path_manager.get_or_create_inode(&rel_path);
                 debug!("lookup: assigned inode {} to path {:?}", ino, rel_path);
 
                 let attr = self.stat_to_fuse_attr(&metadata, ino);
@@ -887,11 +825,11 @@ impl Filesystem for PassthroughFS {
         debug!("getattr(ino={})", ino);
 
         // Special case for root
-        if ino == 1 {
+        if ino == ROOT_INODE {
             let real_path = self.db_source_dir();
             match fs::metadata(&real_path) {
                 Ok(metadata) => {
-                    let attr = self.stat_to_fuse_attr(&metadata, 1);
+                    let attr = self.stat_to_fuse_attr(&metadata, ROOT_INODE);
                     reply.attr(&TTL, &attr);
                 }
                 Err(err) => {
@@ -906,7 +844,7 @@ impl Filesystem for PassthroughFS {
         }
 
         // Get path from inode
-        let rel_path = match self.get_path_for_inode(ino) {
+        let rel_path = match self.path_manager.get_path(ino) {
             Some(p) => p,
             None => {
                 error!("getattr: inode {} not found in map", ino);
@@ -936,28 +874,30 @@ impl Filesystem for PassthroughFS {
         &mut self,
         _req: &Request,
         ino: u64,
-        _fh: u64,
+        fh: u64,
         offset: i64,
         size: u32,
         _flags: i32,
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        debug!("read(ino={}, offset={}, size={})", ino, offset, size);
+        debug!(
+            "read(ino={}, fh={}, offset={}, size={})",
+            ino, fh, offset, size
+        );
 
-        // Get path from inode
-        let path = match self.get_path_for_inode(ino) {
-            Some(p) => p,
+        // Get the path from inode using PathManager
+        let real_path = match self.path_manager.get_path(ino) {
+            Some(path) => {
+                debug!("read: found path {:?} for inode {}", path, ino);
+                self.path_manager.get_real_path(&path)
+            },
             None => {
                 error!("read: inode {} not found in map", ino);
                 reply.error(ENOENT);
                 return;
             }
         };
-
-        debug!("read: found path {:?} for inode {}", path, ino);
-
-        let real_path = self.real_path(&path);
         debug!("read: resolved to real path {:?}", real_path);
 
         match File::open(&real_path) {
@@ -996,7 +936,7 @@ impl Filesystem for PassthroughFS {
         debug!("readdir(ino={}, offset={})", ino, offset);
 
         // Get path from inode
-        let dir_path = match self.get_path_for_inode(ino) {
+        let dir_path = match self.path_manager.get_path(ino) {
             Some(p) => p,
             None => {
                 error!("readdir: inode {} not found in map", ino);
@@ -1030,14 +970,14 @@ impl Filesystem for PassthroughFS {
         // Always add . and .. entries
         entries_vec.push((ino, FileType::Directory, OsString::from(".")));
 
-        // For '..' use the parent's inode, or 1 for the root
-        let parent_ino = if ino == 1 {
-            1 // Root's parent is root
+        // For '..' use the parent's inode, or ROOT_INODE for the root
+        let parent_ino = if ino == ROOT_INODE {
+            ROOT_INODE // Root's parent is root
         } else {
             // Get parent path
             let parent_path = dir_path.parent().unwrap_or(Path::new(""));
             // Get inode for parent path
-            self.get_inode_for_path(parent_path)
+            self.path_manager.get_or_create_inode(parent_path)
         };
         entries_vec.push((parent_ino, FileType::Directory, OsString::from("..")));
 
@@ -1047,18 +987,19 @@ impl Filesystem for PassthroughFS {
                     let file_name = entry.file_name();
 
                     // Skip the database file if we're in the root directory
-                    if ino == 1 && file_name == self.db_path.file_name().unwrap_or_default() {
+                    if ino == ROOT_INODE && file_name == self.db_path.file_name().unwrap_or_default() {
                         debug!("readdir: skipping database file {:?}", file_name);
                         continue;
                     }
 
-                    // Construct virtual path for this entry
-                    let entry_path =
-                        if dir_path == Path::new("/") || dir_path.as_os_str().is_empty() {
-                            PathBuf::from("/").join(&file_name)
-                        } else {
-                            PathBuf::from("/").join(&dir_path).join(&file_name)
-                        };
+                    // Construct virtual path for this entry using PathManager
+                    let entry_path = match self.path_manager.build_path(ino, Path::new(&file_name)) {
+                        Some(p) => p,
+                        None => {
+                            error!("readdir: failed to build path for {:?}", file_name);
+                            continue;
+                        }
+                    };
 
                     debug!(
                         "readdir: processing entry {:?}, virtual path {:?}",
@@ -1077,7 +1018,7 @@ impl Filesystem for PassthroughFS {
                         };
 
                         // Get or create inode for this path
-                        let entry_ino = self.get_inode_for_path(&entry_path);
+                        let entry_ino = self.path_manager.get_or_create_inode(&entry_path);
                         debug!(
                             "readdir: assigned inode {} to path {:?}",
                             entry_ino, entry_path
@@ -1125,32 +1066,30 @@ impl Filesystem for PassthroughFS {
             return;
         }
 
-        // Construct source path based on parent inode
-        let src_path = if parent == 1 {
-            PathBuf::from("/").join(name)
-        } else if let Some(parent_rel_path) = self.inode_map.get(&parent) {
-            PathBuf::from("/").join(parent_rel_path).join(name)
-        } else {
-            error!(
-                "rename: source parent inode {} not found in inode map",
-                parent
-            );
-            reply.error(libc::ENOENT);
-            return;
+        // Construct source path using PathManager
+        let src_path = match self.path_manager.build_path(parent, Path::new(name)) {
+            Some(p) => p,
+            None => {
+                error!(
+                    "rename: source parent inode {} not found in inode map",
+                    parent
+                );
+                reply.error(libc::ENOENT);
+                return;
+            }
         };
 
-        // Construct destination path based on new parent inode
-        let dst_path = if newparent == 1 {
-            PathBuf::from("/").join(newname)
-        } else if let Some(newparent_rel_path) = self.inode_map.get(&newparent) {
-            PathBuf::from("/").join(newparent_rel_path).join(newname)
-        } else {
-            error!(
-                "rename: destination parent inode {} not found in inode map",
-                newparent
-            );
-            reply.error(libc::ENOENT);
-            return;
+        // Construct destination path using PathManager
+        let dst_path = match self.path_manager.build_path(newparent, Path::new(newname)) {
+            Some(p) => p,
+            None => {
+                error!(
+                    "rename: destination parent inode {} not found in inode map",
+                    newparent
+                );
+                reply.error(libc::ENOENT);
+                return;
+            }
         };
 
         let real_src_path = self.real_path(&src_path);
@@ -1173,36 +1112,8 @@ impl Filesystem for PassthroughFS {
         // Perform the rename operation
         match fs::rename(&real_src_path, &real_dst_path) {
             Ok(_) => {
-                // Update the inode mapping if this path has an associated inode
-                let src_rel_path = src_path
-                    .strip_prefix("/")
-                    .unwrap_or(&src_path)
-                    .to_path_buf();
-                let dst_rel_path = dst_path
-                    .strip_prefix("/")
-                    .unwrap_or(&dst_path)
-                    .to_path_buf();
-
-                // Find the inode for this path
-                let inode_to_update = if let Some(&ino) = self.path_map.get(&src_rel_path) {
-                    Some(ino)
-                } else {
-                    None
-                };
-
-                // Update the mappings if found
-                if let Some(ino) = inode_to_update {
-                    self.inode_map.remove(&ino);
-                    self.path_map.remove(&src_rel_path);
-
-                    self.inode_map.insert(ino, dst_rel_path.clone());
-                    self.path_map.insert(dst_rel_path.clone(), ino);
-
-                    debug!(
-                        "rename: updated inode {} from {:?} to {:?}",
-                        ino, src_rel_path, dst_rel_path
-                    );
-                }
+                // Update path mapping in the PathManager
+                self.path_manager.update_path(&src_path, &dst_path);
 
                 reply.ok();
             }
@@ -1235,18 +1146,15 @@ impl Filesystem for PassthroughFS {
             return;
         }
 
-        // Get the parent path from the inode map
-        let parent_path = if parent == 1 {
-            PathBuf::from("/")
-        } else if let Some(parent_rel_path) = self.inode_map.get(&parent) {
-            PathBuf::from("/").join(parent_rel_path)
-        } else {
-            error!("create: parent inode {} not found in inode map", parent);
-            reply.error(libc::ENOENT);
-            return;
+        // Get the parent path using PathManager
+        let path = match self.path_manager.build_path(parent, Path::new(name)) {
+            Some(p) => p,
+            None => {
+                error!("create: parent inode {} not found in inode map", parent);
+                reply.error(libc::ENOENT);
+                return;
+            }
         };
-
-        let path = parent_path.join(name);
         let real_path = self.real_path(&path);
 
         debug!("Creating file at real path: {:?}", real_path);
@@ -1298,8 +1206,8 @@ impl Filesystem for PassthroughFS {
                 }
 
                 // Generate a new inode number for the file
-                let rel_path = path.strip_prefix("/").unwrap_or(&path).to_path_buf();
-                let inode = self.get_inode_for_path(&rel_path);
+                let rel_path = self.path_manager.transform_path(&path, PathForm::Relative);
+                let inode = self.path_manager.get_or_create_inode(&rel_path);
 
                 debug!("Assigned inode {} to path {:?}", inode, rel_path);
 
