@@ -37,20 +37,43 @@ def check-tools [] {
 
 # Get project root directory
 def get-project-root [] {
-    let markers = ["Cargo.toml", ".git"]
-    let current = (pwd)
+    # First try to use the script's directory if available
+    let start_dir = if ($env.FILE_PWD? | is-not-empty) {
+        # If we're in the scripts directory, go up one level
+        let script_dir = $env.FILE_PWD
+        if ($script_dir | path basename) == "scripts" {
+            $script_dir | path dirname
+        } else {
+            $script_dir
+        }
+    } else {
+        pwd
+    }
 
-    mut dir = $current
+    # Look for project markers
+    let markers = ["Cargo.toml", ".git"]
+    mut dir = $start_dir
+
     while $dir != "/" {
         for marker in $markers {
-            if ($"($dir)/($marker)" | path exists) {
-                return $dir
+            let marker_path = ($dir | path join $marker)
+            if ($marker_path | path exists) {
+                # If we found Cargo.toml, check if it's the workspace root
+                if $marker == "Cargo.toml" {
+                    let content = open $marker_path
+                    if ($content | str contains "[workspace]") {
+                        return $dir
+                    }
+                } else {
+                    return $dir
+                }
             }
         }
         $dir = ($dir | path dirname)
     }
 
-    return $current
+    # Fallback to start directory
+    return $start_dir
 }
 
 # Watch for file changes and run appropriate commands

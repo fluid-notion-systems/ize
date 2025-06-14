@@ -22,8 +22,12 @@ def main [] {
     # Check for cargo-watch
     check-cargo-watch
 
+    # Get script directory and project root
+    let script_dir = ($env.FILE_PWD? | default (pwd))
+    let project_root = ($script_dir | path dirname)
+
     # Change to the library directory
-    cd crates/claris-fuse-lib
+    cd ($project_root | path join "crates" "claris-fuse-lib")
 
     # Use Nu's built-in watch command for simple watching
     # For more complex logic, we'll use cargo-watch with a custom command
@@ -51,7 +55,11 @@ def "main alt" [] {
     print $"(ansi green)Watching for changes in src/ and tests/(ansi reset)"
     print ""
 
-    cd crates/claris-fuse-lib
+    # Get script directory and project root
+    let script_dir = ($env.FILE_PWD? | default (pwd))
+    let project_root = ($script_dir | path dirname)
+
+    cd ($project_root | path join "crates" "claris-fuse-lib")
 
     # Nu's watch command with custom handler
     watch . --glob=**/*.rs --glob=**/Cargo.toml {|op, path|
@@ -75,21 +83,33 @@ def "main alt" [] {
 # Run tests only
 def "main test" [] {
     print $"(ansi blue)Starting test watch mode...(ansi reset)"
-    cd crates/claris-fuse-lib
+    # Get script directory and project root
+    let script_dir = ($env.FILE_PWD? | default (pwd))
+    let project_root = ($script_dir | path dirname)
+
+    cd ($project_root | path join "crates" "claris-fuse-lib")
     cargo watch --clear -x test
 }
 
 # Run build only
 def "main build" [] {
     print $"(ansi blue)Starting build watch mode...(ansi reset)"
-    cd crates/claris-fuse-lib
+    # Get script directory and project root
+    let script_dir = ($env.FILE_PWD? | default (pwd))
+    let project_root = ($script_dir | path dirname)
+
+    cd ($project_root | path join "crates" "claris-fuse-lib")
     cargo watch --clear -x build
 }
 
 # Run with specific features
 def "main with-features" [features: string] {
     print $"(ansi blue)Starting watch mode with features: ($features)(ansi reset)"
-    cd crates/claris-fuse-lib
+    # Get script directory and project root
+    let script_dir = ($env.FILE_PWD? | default (pwd))
+    let project_root = ($script_dir | path dirname)
+
+    cd ($project_root | path join "crates" "claris-fuse-lib")
     cargo watch --clear -x $"build --features ($features)" -x $"test --features ($features)"
 }
 
