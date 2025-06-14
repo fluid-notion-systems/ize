@@ -11,6 +11,7 @@
 
 pub mod common;
 pub mod functional;
+pub mod integration;
 
 // Test modules are automatically discovered by cargo test
 // They don't need to be declared here unless we want to share
