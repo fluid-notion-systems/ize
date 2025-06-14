@@ -163,29 +163,43 @@ pub trait VoiceProjectAnalysis {
 "Commit these changes with message 'Add voice interface'"
 ```
 
-**Fuse Git Bridge:**
+**Git Command Delegation:**
 ```rust
+// Note: Git operations are delegated to external tools rather than 
+// implemented in the filesystem layer. Claris-Fuse acts as a coordinator.
+
 pub struct VoiceGitCommand {
     command: GitOperation,
     requires_confirmation: bool,
 }
 
 impl ClarisFuse {
-    pub async fn execute_git_voice_command(&self, cmd: VoiceGitCommand) -> Result<()> {
+    pub async fn delegate_git_command(&self, cmd: VoiceGitCommand) -> Result<()> {
         // Validate command safety
         if cmd.requires_confirmation {
             self.request_voice_confirmation().await?;
         }
         
+        // Delegate to appropriate git tooling (e.g., git CLI, libgit2, etc.)
         match cmd.command {
-            GitOperation::Status => self.git_status_summary().await,
-            GitOperation::Branch { name } => self.create_branch(name).await,
-            GitOperation::Commit { message } => {
-                self.stage_current_changes().await?;
-                self.commit(message).await
+            GitOperation::Status => {
+                let output = self.execute_external_git(&["status", "--short"]).await?;
+                self.format_git_response(output)
             }
-            // ... other git operations
+            GitOperation::Branch { name } => {
+                self.execute_external_git(&["checkout", "-b", &name]).await
+            }
+            GitOperation::Commit { message } => {
+                self.execute_external_git(&["commit", "-m", &message]).await
+            }
+            // ... other git operations delegated similarly
         }
+    }
+    
+    async fn execute_external_git(&self, args: &[&str]) -> Result<String> {
+        // Delegate to external git command or library
+        // This keeps git operations separate from filesystem concerns
+        todo!("Implement delegation to git tooling")
     }
 }
 ```
