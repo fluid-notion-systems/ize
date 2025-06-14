@@ -12,13 +12,7 @@ fuser = "0.15.1"
 libc = "0.2"
 log = "0.4"
 env_logger = "0.10"
-async-trait = "0.1"
-tokio = { version = "1", features = ["full"] }
 thiserror = "1.0"
-sha2 = "0.10"
-hex = "0.4"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.4", features = ["v4"] }
 nix = { version = "0.30.1", features = ["fs"] }
 clap = { version = "4.4", features = ["derive"] }
 
