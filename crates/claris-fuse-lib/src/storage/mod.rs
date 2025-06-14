@@ -1,5 +1,3 @@
-pub mod sqlite;
-
 use std::io::Result;
 use std::path::Path;
 
@@ -20,17 +18,26 @@ pub struct StorageManager;
 
 impl StorageManager {
     /// Initialize a new database with the specified storage engine
-    pub fn init<P: AsRef<Path>>(path: P) -> Result<()> {
-        sqlite::SqliteStorage::init(path)
+    pub fn init<P: AsRef<Path>>(_path: P) -> Result<()> {
+        // TODO: Implement storage initialization
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Storage backend not implemented yet",
+        ))
     }
 
     /// Check if the database at the specified path is valid
-    pub fn is_valid<P: AsRef<Path>>(path: P) -> Result<bool> {
-        sqlite::SqliteStorage::is_valid(path)
+    pub fn is_valid<P: AsRef<Path>>(_path: P) -> Result<bool> {
+        // TODO: Implement storage validation
+        Ok(false)
     }
 
-    /// Open an existing database at the specified path
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<sqlite::SqliteStorage> {
-        sqlite::SqliteStorage::open(path)
+    /// Open an existing storage backend at the specified path
+    pub fn open<P: AsRef<Path>>(_path: P) -> Result<()> {
+        // TODO: Implement storage opening
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Storage backend not implemented yet",
+        ))
     }
 }
