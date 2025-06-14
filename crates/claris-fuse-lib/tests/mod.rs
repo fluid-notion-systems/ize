@@ -10,6 +10,7 @@
 //! eliminate duplicate setup code and ensure consistent test environments.
 
 pub mod common;
+pub mod functional;
 
 // Test modules are automatically discovered by cargo test
 // They don't need to be declared here unless we want to share
