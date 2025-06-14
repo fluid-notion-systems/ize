@@ -28,7 +28,7 @@ Claris-FUSE is a version-controlled filesystem implemented with FUSE in Rust. It
   - Perfect fit for filesystem versioning needs
 
 ### Architecture Components
-- **OpCode Queue**: Asynchronous operation processing (renamed from Command Queue)
+- **Op Queue**: Asynchronous operation processing (renamed from Command Queue)
 - **PassthroughFS**: Transparent filesystem layer
 - **Storage Trait**: Pluggable backend interface
 - **CLI**: User interaction layer
@@ -45,7 +45,7 @@ Claris-FUSE is a version-controlled filesystem implemented with FUSE in Rust. It
 ├─────────────────────────────────────────┤
 │       PassthroughFS Layer               │  ← Transparent operations
 ├─────────────────────────────────────────┤
-│         OpCode Queue                    │  ← Async processing
+│           Op Queue                      │  ← Async processing
 ├─────────────────────────────────────────┤
 │     Storage Trait Interface             │  ← Pluggable backends
 ├─────────────────────────────────────────┤
@@ -62,7 +62,7 @@ Provides transparent filesystem operations with:
 - Database file hiding from mount view
 - Full POSIX compliance
 
-### OpCode Queue System
+### Op Queue System
 
 Asynchronous operation processing for performance:
 
@@ -79,7 +79,7 @@ pub enum OpType {
     RemoveDir,
 }
 
-pub struct OpCode {
+pub struct Op {
     id: Option<u64>,
     op_type: OpType,
     timestamp: u64,
@@ -93,8 +93,8 @@ pub struct OpCode {
 ```rust
 pub trait Storage: Send + Sync {
     fn init(path: &Path) -> Result<Self>;
-    fn store_opcode(&mut self, op: &OpCode) -> Result<()>;
-    fn get_opcodes_for_path(&self, path: &str) -> Result<Vec<OpCode>>;
+    fn store_op(&mut self, op: &Op) -> Result<()>;
+    fn get_ops_for_path(&self, path: &str) -> Result<Vec<Op>>;
     fn get_file_at_version(&self, path: &str, version: u64) -> Result<FileContent>;
     fn create_snapshot(&self) -> Result<SnapshotId>;
 }
@@ -203,8 +203,8 @@ CREATE TABLE content (
 - Storage backend comparisons
 - Regression detection framework
 
-### Phase 3: OpCode Queue Refactoring
-- Command → OpCode renaming
+### Phase 3: Op Queue Refactoring
+- Command → Op renaming
 - Improved async processing
 - Batch optimization
 
@@ -251,7 +251,7 @@ claris-fuse snapshot create --name="before-refactor"
 ### Code Organization
 - `/src/filesystem/` - FUSE filesystem implementation
 - `/src/storage/` - Storage backend implementations
-- `/src/opcode/` - Operation queue system
+- `/src/op/` - Operation queue system
 - `/src/cli/` - Command-line interface
 - `/tests/` - Test harness and test suites
 - `/research/` - Design documents and analysis

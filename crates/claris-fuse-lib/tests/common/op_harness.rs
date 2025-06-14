@@ -1,6 +1,6 @@
-//! OpCode queue test harness for Claris-FUSE
+//! Op queue test harness for Claris-FUSE
 //!
-//! Provides minimal infrastructure for testing the OpCode queue system.
+//! Provides minimal infrastructure for testing the Op queue system.
 
 use super::harness::{TestHarness, TestHarnessBuilder, TestResources};
 use std::io;
@@ -35,15 +35,15 @@ impl MockStorage {
     }
 }
 
-/// OpCode queue test harness
-pub struct OpCodeQueueHarness {
+/// Op queue test harness
+pub struct OpQueueHarness {
     resources: TestResources,
     storage: MockStorage,
     queue_size: usize,
 }
 
-impl OpCodeQueueHarness {
-    /// Create a new OpCode queue test harness
+impl OpQueueHarness {
+    /// Create a new Op queue test harness
     pub fn new() -> Self {
         Self {
             resources: TestResources::new(),
@@ -53,14 +53,14 @@ impl OpCodeQueueHarness {
     }
 }
 
-impl TestHarness for OpCodeQueueHarness {
-    type Context<'a> = OpCodeQueueContext<'a>;
+impl TestHarness for OpQueueHarness {
+    type Context<'a> = OpQueueContext<'a>;
 
     fn test_with<F, R>(&mut self, test_fn: F) -> R
     where
         F: FnOnce(Self::Context<'_>) -> R,
     {
-        let ctx = OpCodeQueueContext {
+        let ctx = OpQueueContext {
             storage: &self.storage,
             queue_size: self.queue_size,
         };
@@ -68,15 +68,15 @@ impl TestHarness for OpCodeQueueHarness {
     }
 }
 
-/// Context provided to OpCode queue test functions
+/// Context provided to Op queue test functions
 #[derive(Debug)]
-pub struct OpCodeQueueContext<'a> {
+pub struct OpQueueContext<'a> {
     pub storage: &'a MockStorage,
     pub queue_size: usize,
 }
 
-/// Builder for OpCodeQueueHarness
-pub struct OpCodeQueueHarnessBuilder {
+/// Builder for OpQueueHarness
+pub struct OpQueueHarnessBuilder {
     queue_size: usize,
     storage_fail_pattern: Option<String>,
 }
@@ -100,8 +100,8 @@ impl OpCodeQueueHarnessBuilder {
     }
 }
 
-impl TestHarnessBuilder for OpCodeQueueHarnessBuilder {
-    type Harness = OpCodeQueueHarness;
+impl TestHarnessBuilder for OpQueueHarnessBuilder {
+    type Harness = OpQueueHarness;
 
     fn build(self) -> io::Result<Self::Harness> {
         let mut storage = MockStorage::new();
@@ -109,7 +109,7 @@ impl TestHarnessBuilder for OpCodeQueueHarnessBuilder {
             storage = storage.with_failure_pattern(&pattern);
         }
 
-        Ok(OpCodeQueueHarness {
+        Ok(OpQueueHarness {
             resources: TestResources::new(),
             storage,
             queue_size: self.queue_size,
@@ -117,7 +117,7 @@ impl TestHarnessBuilder for OpCodeQueueHarnessBuilder {
     }
 }
 
-impl Default for OpCodeQueueHarnessBuilder {
+impl Default for OpQueueHarnessBuilder {
     fn default() -> Self {
         Self::new()
     }

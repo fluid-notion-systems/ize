@@ -13,8 +13,8 @@ This directory contains research and analysis for the Claris-FUSE project, organ
 - **[Operation Throughput Analysis](operation_throughput_analysis.md)** - Queue and filesystem operation benchmarks
 - **[Storage Backend Comparisons](storage_backend_benchmarks.md)** - Comparative performance analysis
 
-### Phase 3: OpCode Queue Refactoring
-- **[OpCode Queue Design](opcode_queue_design.md)** - Rename Command → OpCode, improve architecture
+### Phase 3: Op Queue Refactoring
+- **[Op Queue Design](opcode_queue_design.md)** - Rename Command → Op, improve architecture
 - **[Async Processing Pipeline](async_processing_pipeline.md)** - Background persistence and performance optimization
 
 ### Phase 4: Persistence Layer Research
@@ -39,7 +39,7 @@ This directory contains research and analysis for the Claris-FUSE project, organ
 - Storage Backend Comparisons
 
 ### Architecture & Design
-- OpCode Queue Design
+- Op Queue Design
 - Async Processing Pipeline
 - Salsa Incremental Computation
 
@@ -54,7 +54,7 @@ This directory contains research and analysis for the Claris-FUSE project, organ
 
 1. **Immediate (Week 1-2)**: Implement clean testing harness framework
 2. **Short-term (Week 3-4)**: Establish benchmarking baselines and performance metrics
-3. **Near-term (Month 2)**: Refactor Command → OpCode queue system
+3. **Near-term (Month 2)**: Refactor Command → Op queue system
 4. **Medium-term (Month 2-3)**: Evaluate and integrate Pijul storage components
 5. **Long-term (Month 3+)**: Custom pure-Rust persistence layer
 

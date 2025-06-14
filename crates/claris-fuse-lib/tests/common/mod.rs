@@ -5,7 +5,7 @@
 
 pub mod filesystem_harness;
 pub mod harness;
-pub mod opcode_harness;
+pub mod op_harness;
 
 // Re-export commonly used items
 pub use harness::{
@@ -16,9 +16,7 @@ pub use filesystem_harness::{
     FilesystemTestContext, FilesystemTestHarness, FilesystemTestHarnessBuilder,
 };
 
-pub use opcode_harness::{
-    MockStorage, OpCodeQueueContext, OpCodeQueueHarness, OpCodeQueueHarnessBuilder,
-};
+pub use op_harness::{MockStorage, OpQueueContext, OpQueueHarness, OpQueueHarnessBuilder};
 
 // Re-export the test macro
 pub use crate::test_with_harness;

@@ -4,7 +4,7 @@
 //! clean, maintainable tests without duplicate setup code.
 
 use crate::common::{
-    FilesystemTestHarnessBuilder, OpCodeQueueHarnessBuilder, TestHarness, TestHarnessBuilder,
+    FilesystemTestHarnessBuilder, OpQueueHarnessBuilder, TestHarness, TestHarnessBuilder,
 };
 
 #[test]
@@ -33,9 +33,9 @@ fn test_filesystem_harness_basic_usage() -> std::io::Result<()> {
 }
 
 #[test]
-fn test_opcode_queue_harness_usage() -> std::io::Result<()> {
+fn test_op_queue_harness_usage() -> std::io::Result<()> {
     // Create harness with custom configuration
-    let mut harness = OpCodeQueueHarnessBuilder::new().queue_size(100).build()?;
+    let mut harness = OpQueueHarnessBuilder::new().queue_size(100).build()?;
 
     harness.test_with(|ctx| {
         // Access queue configuration
@@ -75,7 +75,7 @@ fn test_harness_with_multiple_operations() -> std::io::Result<()> {
 #[test]
 fn test_harness_with_failure_simulation() -> std::io::Result<()> {
     // Configure harness to simulate failures
-    let mut harness = OpCodeQueueHarnessBuilder::new()
+    let mut harness = OpQueueHarnessBuilder::new()
         .with_storage_failure("error")
         .build()?;
 

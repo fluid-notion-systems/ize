@@ -17,8 +17,8 @@ This document outlines the comprehensive testing strategy for Claris-FUSE, organ
 - Root directory handling
 - Path cache consistency
 
-#### OpCode Queue Tests
-**File**: `opcode_queue_test.rs`
+#### Op Queue Tests
+**File**: `op_queue_test.rs`
 - Basic enqueue/dequeue operations
 - Queue capacity limits
 - Thread-safe concurrent access
@@ -62,8 +62,8 @@ This document outlines the comprehensive testing strategy for Claris-FUSE, organ
 - Schema migrations
 - Data integrity after crashes
 
-#### OpCode Processing Pipeline Tests
-**File**: `opcode_pipeline_test.rs`
+#### Op Processing Pipeline Tests
+**File**: `op_pipeline_test.rs`
 - Queue → Storage flow
 - Batch processing efficiency
 - Error recovery mechanisms
@@ -102,8 +102,8 @@ This document outlines the comprehensive testing strategy for Claris-FUSE, organ
 // - Directory structure integrity
 ```
 
-#### OpCode Properties Tests
-**File**: `opcode_properties_test.rs`
+#### Op Properties Tests
+**File**: `op_properties_test.rs`
 ```rust
 // Properties to test:
 // - Operations are idempotent where applicable
@@ -158,7 +158,7 @@ This document outlines the comprehensive testing strategy for Claris-FUSE, organ
 
 ### Phase 1: Core Unit Tests
 1. Implement path management tests
-2. Create OpCode queue tests
+2. Create Op queue tests
 3. Add storage interface tests
 4. Validate CLI parsing
 
