@@ -1,82 +1,53 @@
 # Claris-FUSE
 
-A version-controlled filesystem implemented with FUSE in Rust. Claris-FUSE maintains a linear history of file operations (create/update/delete) similar to Git but at the filesystem level.
+A version-controlled filesystem implemented with FUSE in Rust. 
 
-## Features
+## What is Claris-FUSE?
 
-- Transparent versioning of all file operations
-- Ability to view file history
-- Restoring files to previous versions 
-- History browsing through special filesystem interface
-- Configurable retention policies
-- AI-powered commit messages for file changes (coming soon)
-- Extended search capabilities through file history
+Claris-FUSE tracks every change to your files automatically, like Git but at the filesystem level. Mount a directory, and all file operations are transparently versioned - no commits needed.
 
-## Prerequisites
+## Quick Start
+
+### Prerequisites
 
 - Rust toolchain (2021 edition or newer)
-- libfuse3 development package
+- libfuse3 development package:
   - Ubuntu/Debian: `sudo apt install libfuse3-dev`
   - Fedora: `sudo dnf install fuse3-devel`
   - Arch Linux: `sudo pacman -S fuse3`
 
-## Building
+### Building
 
 ```bash
-# Clone the repository
-git clone https://github.com/claris/claris-fuse.git
+git clone https://github.com/claris-assistant/claris-fuse.git
 cd claris-fuse
-
-# Build the project
-cargo build
-
-# For release build
 cargo build --release
 ```
 
-## Usage
-
-Currently, only the basic passthrough filesystem functionality is implemented (Phase 1).
+### Basic Usage
 
 ```bash
-# Mount a filesystem (read-only mode for now)
-cargo run -- mount /path/to/source /mount/point
+# Initialize a directory for version control
+claris-fuse init /path/to/directory
 
-# With custom log level
-cargo run -- --log-level debug mount /path/to/source /mount/point
+# Mount the filesystem
+claris-fuse mount /path/to/directory /mount/point
 
-# Using the binary directly (after building)
-./target/debug/claris-fuse mount /path/to/source /mount/point
+# Use the mounted filesystem normally - all changes are tracked!
 
-# For optimal performance, use the release build
-./target/release/claris-fuse mount /path/to/source /mount/point
-```
-
-### Unmounting
-
-To unmount the filesystem, use:
-
-```bash
+# Unmount when done
 fusermount -u /mount/point
 ```
 
-## Development Status
+## Documentation
 
-- [x] Phase 1: Foundation
-  - [x] Basic passthrough filesystem
-  - [x] Storage trait interface
-  - [x] SQLite schema design
+- **[Architecture](architecture.md)** - System design, components, and roadmap
+- **[Research](research/)** - Design documents and analysis
+- **[Contributing](CONTRIBUTING.md)** - Development guidelines
 
-- [ ] Phase 2: Core Functionality
-  - [ ] SQLite storage backend
-  - [ ] Versioning layer
-  - [ ] CLI tools for history and restore
+## Status
 
-- [ ] Phase 3: Advanced Features
-  - [ ] Async background processing
-  - [ ] LLM integration for change descriptions
-  - [ ] Search capabilities
-  - [ ] Configurable retention policies
+Currently in Phase 1: Building a robust testing framework and benchmarking system. Core passthrough filesystem is operational.
 
 ## License
 
