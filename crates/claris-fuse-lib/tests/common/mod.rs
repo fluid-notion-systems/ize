@@ -1,45 +1,24 @@
-// use diesel::prelude::*;
-// use diesel::sqlite::SqliteConnection;
-// use diesel_migrations::{EmbeddedMigrations, MigrationHarness};
-// use std::fs;
-// use std::path::PathBuf;
-// use tempfile::tempdir;
+//! Common test utilities and harnesses for Claris-FUSE
+//!
+//! This module provides reusable test infrastructure to eliminate
+//! duplicate setup code and create focused, maintainable tests.
 
-// // Get the migrations from the diesel_sqlite module
-// #[allow(dead_code)]
-// pub const MIGRATIONS: EmbeddedMigrations = diesel_migrations::embed_migrations!("migrations");
+pub mod filesystem_harness;
+pub mod harness;
+pub mod opcode_harness;
 
-// #[allow(dead_code)]
-// pub fn setup_test_db() -> (SqliteConnection, PathBuf) {
-//     // Create a temporary directory for our test database
-//     let temp_dir = tempdir().expect("Failed to create temporary directory");
-//     let db_path = temp_dir.path().join("test.db");
+// Re-export commonly used items
+pub use harness::{
+    assertions, TestError, TestHarness, TestHarnessBuilder, TestResources, TestResult,
+};
 
-//     // Create a new SQLite connection
-//     let mut connection = SqliteConnection::establish(db_path.to_str().unwrap())
-//         .expect("Failed to create SQLite connection");
+pub use filesystem_harness::{
+    FilesystemTestContext, FilesystemTestHarness, FilesystemTestHarnessBuilder,
+};
 
-//     // Run migrations to set up the schema
-//     connection
-//         .run_pending_migrations(MIGRATIONS)
-//         .expect("Failed to run migrations");
+pub use opcode_harness::{
+    MockStorage, OpCodeQueueContext, OpCodeQueueHarness, OpCodeQueueHarnessBuilder,
+};
 
-//     (connection, db_path)
-// }
-
-// #[allow(dead_code)]
-// pub fn cleanup(db_path: PathBuf) {
-//     if db_path.exists() {
-//         fs::remove_file(db_path).expect("Failed to remove test database file");
-//     }
-// }
-
-// #[allow(dead_code)]
-// pub fn get_unix_timestamp() -> i64 {
-//     use std::time::{SystemTime, UNIX_EPOCH};
-
-//     SystemTime::now()
-//         .duration_since(UNIX_EPOCH)
-//         .unwrap()
-//         .as_secs() as i64
-// }
+// Re-export the test macro
+pub use crate::test_with_harness;
