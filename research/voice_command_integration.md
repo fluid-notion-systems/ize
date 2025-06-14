@@ -153,53 +153,71 @@ pub trait VoiceProjectAnalysis {
 }
 ```
 
-### 2. Git Integration via Voice
+### 2. DVCS Operations via Voice
 
-**Voice-Driven Version Control:**
+**Voice-Driven Version Control with Claris-Fuse:**
 ```
-"What's the git status?"
+"What's changed in my project?"
 "Show me uncommitted changes"
 "Create a branch called feature/voice-commands"
-"Commit these changes with message 'Add voice interface'"
+"Record these changes with message 'Add voice interface'"
+"Merge the voice-feature branch"
 ```
 
-**Git Command Delegation:**
+**Native Claris-Fuse Version Control:**
 ```rust
-// Note: Git operations are delegated to external tools rather than 
-// implemented in the filesystem layer. Claris-Fuse acts as a coordinator.
+// Claris-Fuse IS the distributed version control system
+// These operations are native to the filesystem layer
 
-pub struct VoiceGitCommand {
-    command: GitOperation,
+pub struct VoiceDVCSCommand {
+    command: DVCSOperation,
     requires_confirmation: bool,
 }
 
 impl ClarisFuse {
-    pub async fn delegate_git_command(&self, cmd: VoiceGitCommand) -> Result<()> {
+    pub async fn execute_dvcs_command(&self, cmd: VoiceDVCSCommand) -> Result<()> {
         // Validate command safety
         if cmd.requires_confirmation {
             self.request_voice_confirmation().await?;
         }
         
-        // Delegate to appropriate git tooling (e.g., git CLI, libgit2, etc.)
+        // Execute native Claris-Fuse DVCS operations
         match cmd.command {
-            GitOperation::Status => {
-                let output = self.execute_external_git(&["status", "--short"]).await?;
-                self.format_git_response(output)
+            DVCSOperation::Status => {
+                let changes = self.get_working_tree_changes().await?;
+                Ok(DVCSResult::Status(changes))
             }
-            GitOperation::Branch { name } => {
-                self.execute_external_git(&["checkout", "-b", &name]).await
+            DVCSOperation::Branch { name } => {
+                self.create_branch(&name).await?;
+                self.switch_to_branch(&name).await
             }
-            GitOperation::Commit { message } => {
-                self.execute_external_git(&["commit", "-m", &message]).await
+            DVCSOperation::Record { message } => {
+                let snapshot = self.snapshot_working_tree().await?;
+                self.record_changes(snapshot, &message).await
             }
-            // ... other git operations delegated similarly
+            DVCSOperation::Merge { branch } => {
+                self.merge_branch(&branch).await
+            }
+            // ... other DVCS operations implemented natively
         }
     }
     
-    async fn execute_external_git(&self, args: &[&str]) -> Result<String> {
-        // Delegate to external git command or library
-        // This keeps git operations separate from filesystem concerns
-        todo!("Implement delegation to git tooling")
+    // Native DVCS operations as part of the filesystem
+    async fn get_working_tree_changes(&self) -> Result<Vec<Change>> {
+        // Compare current state with last snapshot
+        self.diff_with_head().await
+    }
+    
+    async fn record_changes(&self, snapshot: Snapshot, message: &str) -> Result<ChangeId> {
+        // Create a new change record in the Claris-Fuse history
+        let change = Change {
+            id: ChangeId::new(),
+            snapshot,
+            message: message.to_string(),
+            timestamp: SystemTime::now(),
+            author: self.current_user(),
+        };
+        self.append_to_history(change).await
     }
 }
 ```
