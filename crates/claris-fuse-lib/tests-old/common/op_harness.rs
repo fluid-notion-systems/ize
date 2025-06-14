@@ -37,7 +37,7 @@ impl MockStorage {
 
 /// Op queue test harness
 pub struct OpQueueHarness {
-    _resources: TestResources,
+    resources: TestResources,
     storage: MockStorage,
     queue_size: usize,
 }
@@ -46,7 +46,7 @@ impl OpQueueHarness {
     /// Create a new Op queue test harness
     pub fn new() -> Self {
         Self {
-            _resources: TestResources::new(),
+            resources: TestResources::new(),
             storage: MockStorage::new(),
             queue_size: 10,
         }
@@ -81,7 +81,7 @@ pub struct OpQueueHarnessBuilder {
     storage_fail_pattern: Option<String>,
 }
 
-impl OpQueueHarnessBuilder {
+impl OpCodeQueueHarnessBuilder {
     pub fn new() -> Self {
         Self {
             queue_size: 10,
@@ -110,7 +110,7 @@ impl TestHarnessBuilder for OpQueueHarnessBuilder {
         }
 
         Ok(OpQueueHarness {
-            _resources: TestResources::new(),
+            resources: TestResources::new(),
             storage,
             queue_size: self.queue_size,
         })

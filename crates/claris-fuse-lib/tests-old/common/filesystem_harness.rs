@@ -45,13 +45,13 @@ impl TestHarness for FilesystemTestHarness {
         // Create source directory if not set
         if self.source_dir.is_none() {
             let dir = self.resources.create_temp_dir()?;
-            self.source_dir = Some(dir);
+            self.source_dir = Some(dir.to_path_buf());
         }
 
         // Create mount directory if not set
         if self.mount_dir.is_none() {
             let dir = self.resources.create_temp_dir()?;
-            self.mount_dir = Some(dir);
+            self.mount_dir = Some(dir.to_path_buf());
         }
 
         // Create DB file if not set

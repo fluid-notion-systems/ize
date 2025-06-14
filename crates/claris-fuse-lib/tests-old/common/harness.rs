@@ -6,7 +6,6 @@
 use std::fmt::Debug;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use tempfile::TempDir;
 
 /// Core trait for all test harnesses
@@ -50,17 +49,17 @@ impl TestResources {
     }
 
     /// Create a new temporary directory
-    pub fn create_temp_dir(&mut self) -> io::Result<PathBuf> {
+    pub fn create_temp_dir(&mut self) -> io::Result<&Path> {
         let temp_dir = tempfile::tempdir()?;
-        let path = temp_dir.path().to_path_buf();
+        let path = temp_dir.path();
         self.temp_dirs.push(temp_dir);
         Ok(path)
     }
 
     /// Create a temporary directory with a specific prefix
-    pub fn create_temp_dir_with_prefix(&mut self, prefix: &str) -> io::Result<PathBuf> {
+    pub fn create_temp_dir_with_prefix(&mut self, prefix: &str) -> io::Result<&Path> {
         let temp_dir = tempfile::Builder::new().prefix(prefix).tempdir()?;
-        let path = temp_dir.path().to_path_buf();
+        let path = temp_dir.path();
         self.temp_dirs.push(temp_dir);
         Ok(path)
     }
@@ -245,7 +244,7 @@ mod tests {
         };
 
         harness.test_with(|(resources, value)| {
-            assert_eq!(value, 42);
+            assert_eq!(*value, 42);
             assert!(resources.temp_dirs.is_empty());
         });
     }
