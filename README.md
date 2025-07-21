@@ -19,8 +19,8 @@ Ize tracks every change to your files automatically, like Git but at the filesys
 ### Building
 
 ```bash
-git clone https://github.com/fluid-notion-systems/Ize.git
-cd Ize
+git clone https://github.com/fluid-notion-systems/ize.git
+cd ize
 cargo build --release
 ```
 
@@ -28,10 +28,10 @@ cargo build --release
 
 ```bash
 # Initialize a directory for version control
-Ize init /path/to/directory
+ize init /path/to/directory
 
 # Mount the filesystem
-Ize mount /path/to/directory /mount/point
+ize mount /path/to/directory /mount/point
 
 # Use the mounted filesystem normally - all changes are tracked!
 
