@@ -1,11 +1,11 @@
 [workspace]
-members = ["crates/claris-fuse", "crates/claris-fuse-lib"]
+members = ["crates/ize", "crates/ize-lib"]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Claris Team"]
+authors = ["Fluid Notion Team"]
 description = "A FUSE filesystem with version control capabilities"
-repository = "https://github.com/claris/claris-fuse"
+repository = "https://github.com/fluid-notion-systems/ize"
 license = "MIT"

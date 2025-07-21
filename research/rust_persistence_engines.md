@@ -1,10 +1,10 @@
-# Rust Persistence Engines Analysis for Claris-FUSE
+# Rust Persistence Engines Analysis for Ize
 
 ## Overview
 
 This document analyzes Rust persistence engines for implementing a high-performance, embedded version control storage layer. We evaluate engines based on performance, reliability, API design, and suitability for filesystem operations.
 
-## Requirements for Claris-FUSE
+## Requirements for Ize
 
 ### Core Requirements
 - **Embedded**: No external dependencies, single-file deployment
@@ -265,10 +265,10 @@ let value = txn.get(db, &b"key")?;
 pub struct FileSystemStorage {
     // Core tables
     files: Table<PathBuf, FileRecord>,
-    directories: Table<PathBuf, DirectoryRecord>, 
+    directories: Table<PathBuf, DirectoryRecord>,
     content: Table<ContentHash, Vec<u8>>,
     opcodes: Table<OpCodeId, OpCode>,
-    
+
     // Index tables for fast queries
     path_to_opcodes: Table<PathBuf, Vec<OpCodeId>>,
     timestamp_index: Table<Timestamp, Vec<OpCodeId>>,
@@ -290,21 +290,21 @@ pub struct FileSystemStorage {
 
 ```rust
 // Proposed architecture
-pub struct ClarisStorage {
+pub struct IzeStorage {
     // Core Sanakirja environment
     env: sanakirja::Env,
-    
+
     // Specialized tables
     file_table: Table<PathId, FileMetadata>,
     content_table: Table<ContentHash, ContentData>,
     opcode_table: Table<OpCodeId, OpCode>,
-    
+
     // Indexes for fast queries
     path_index: Table<String, PathId>,
     history_index: Table<PathId, Vec<OpCodeId>>,
 }
 
-impl ClarisStorage {
+impl IzeStorage {
     // High-level API for filesystem operations
     pub fn store_file_operation(&mut self, path: &Path, opcode: OpCode) -> Result<OpCodeId>;
     pub fn get_file_history(&self, path: &Path) -> Result<Vec<OpCode>>;

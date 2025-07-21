@@ -1,23 +1,23 @@
 #!/usr/bin/env nu
 
-# Ultra-simple watch commands for Claris-FUSE
+# Ultra-simple watch commands for Ize
 # Run from project root
 
 # Watch and test
 def wt [] {
-    cd crates/claris-fuse-lib
+    cd crates/Ize-lib
     cargo watch -x test
 }
 
 # Watch and build
 def wb [] {
-    cd crates/claris-fuse-lib
+    cd crates/Ize-lib
     cargo watch -x build
 }
 
 # Watch and do both
 def wa [] {
-    cd crates/claris-fuse-lib
+    cd crates/Ize-lib
     cargo watch -x build -x test
 }
 

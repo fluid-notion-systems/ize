@@ -1,6 +1,6 @@
 #!/usr/bin/env nu
 
-# Claris-FUSE Development Watch Script for Nu Shell
+# Ize Development Watch Script for Nu Shell
 # Automatically runs tests when test files change, builds when source files change
 
 # Check if cargo-watch is installed
@@ -14,7 +14,7 @@ def check-cargo-watch [] {
 
 # Main watch function
 def main [] {
-    print $"(ansi blue)Starting Claris-FUSE watch mode...(ansi reset)"
+    print $"(ansi blue)Starting Ize watch mode...(ansi reset)"
     print $"(ansi green)• Test files \(tests/**/*.rs\) → cargo test(ansi reset)"
     print $"(ansi green)• Source files \(src/**/*.rs\) → cargo build(ansi reset)"
     print ""
@@ -27,7 +27,7 @@ def main [] {
     let project_root = ($script_dir | path dirname)
 
     # Change to the library directory
-    cd ($project_root | path join "crates" "claris-fuse-lib")
+    cd ($project_root | path join "crates" "Ize-lib")
 
     # Use Nu's built-in watch command for simple watching
     # For more complex logic, we'll use cargo-watch with a custom command
@@ -51,7 +51,7 @@ def main [] {
 
 # Alternative implementation using Nu's watch command directly
 def "main alt" [] {
-    print $"(ansi blue)Starting Claris-FUSE watch mode with Nu's built-in watch...(ansi reset)"
+    print $"(ansi blue)Starting Ize watch mode with Nu's built-in watch...(ansi reset)"
     print $"(ansi green)Watching for changes in src/ and tests/(ansi reset)"
     print ""
 
@@ -59,7 +59,7 @@ def "main alt" [] {
     let script_dir = ($env.FILE_PWD? | default (pwd))
     let project_root = ($script_dir | path dirname)
 
-    cd ($project_root | path join "crates" "claris-fuse-lib")
+    cd ($project_root | path join "crates" "Ize-lib")
 
     # Nu's watch command with custom handler
     watch . --glob=**/*.rs --glob=**/Cargo.toml {|op, path|
@@ -87,7 +87,7 @@ def "main test" [] {
     let script_dir = ($env.FILE_PWD? | default (pwd))
     let project_root = ($script_dir | path dirname)
 
-    cd ($project_root | path join "crates" "claris-fuse-lib")
+    cd ($project_root | path join "crates" "Ize-lib")
     cargo watch --clear -x test
 }
 
@@ -98,7 +98,7 @@ def "main build" [] {
     let script_dir = ($env.FILE_PWD? | default (pwd))
     let project_root = ($script_dir | path dirname)
 
-    cd ($project_root | path join "crates" "claris-fuse-lib")
+    cd ($project_root | path join "crates" "Ize-lib")
     cargo watch --clear -x build
 }
 
@@ -109,13 +109,13 @@ def "main with-features" [features: string] {
     let script_dir = ($env.FILE_PWD? | default (pwd))
     let project_root = ($script_dir | path dirname)
 
-    cd ($project_root | path join "crates" "claris-fuse-lib")
+    cd ($project_root | path join "crates" "Ize-lib")
     cargo watch --clear -x $"build --features ($features)" -x $"test --features ($features)"
 }
 
 # Show help
 def "main help" [] {
-    print "Claris-FUSE Watch Script Commands:"
+    print "Ize Watch Script Commands:"
     print ""
     print "  watch.nu              - Watch and run tests/build based on changed files"
     print "  watch.nu alt          - Use Nu's built-in watch (experimental)"

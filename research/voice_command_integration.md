@@ -1,8 +1,8 @@
-# Voice Command Integration for Claris-Fuse
+# Voice Command Integration for Ize
 
 ## Overview
 
-This document explores how voice commands from Claris Mobile can interact with the Claris-Fuse filesystem layer, enabling natural language file operations, code navigation, and project management through speech.
+This document explores how voice commands from Ize Mobile can interact with the Ize filesystem layer, enabling natural language file operations, code navigation, and project management through speech.
 
 ## Core Voice-to-Filesystem Operations
 
@@ -34,7 +34,7 @@ pub enum VoiceFileCommand {
 }
 
 impl VoiceFileCommand {
-    pub async fn execute(&self, fuse: &ClarisFuse) -> Result<CommandResult> {
+    pub async fn execute(&self, fuse: &IzeFuse) -> Result<CommandResult> {
         match self {
             Self::Open { query, confidence } => {
                 let matches = fuse.fuzzy_search_files(query).await?;
@@ -70,22 +70,22 @@ pub struct VoiceFileOperation {
 }
 
 pub enum FileOperation {
-    Create { 
-        path: PathBuf, 
+    Create {
+        path: PathBuf,
         template: Option<String>,
         file_type: FileType,
     },
-    Move { 
-        source: PathBuf, 
+    Move {
+        source: PathBuf,
         destination: PathBuf,
         preserve_history: bool,
     },
-    Rename { 
-        path: PathBuf, 
+    Rename {
+        path: PathBuf,
         new_name: String,
         update_imports: bool,
     },
-    Delete { 
+    Delete {
         paths: Vec<PathBuf>,
         move_to_trash: bool,
     },
@@ -117,7 +117,7 @@ pub enum SearchType {
     Symbol(String),   // Language-aware symbol search
 }
 
-impl ClarisFuse {
+impl IzeFuse {
     pub async fn voice_search(&self, query: VoiceSearchQuery) -> SearchResults {
         match query.query_type {
             SearchType::Semantic(text) => {
@@ -155,7 +155,7 @@ pub trait VoiceProjectAnalysis {
 
 ### 2. DVCS Operations via Voice
 
-**Voice-Driven Version Control with Claris-Fuse:**
+**Voice-Driven Version Control with Ize:**
 ```
 "What's changed in my project?"
 "Show me uncommitted changes"
@@ -164,9 +164,9 @@ pub trait VoiceProjectAnalysis {
 "Merge the voice-feature branch"
 ```
 
-**Native Claris-Fuse Version Control:**
+**Native Ize Version Control:**
 ```rust
-// Claris-Fuse IS the distributed version control system
+// Ize IS the distributed version control system
 // These operations are native to the filesystem layer
 
 pub struct VoiceDVCSCommand {
@@ -174,14 +174,14 @@ pub struct VoiceDVCSCommand {
     requires_confirmation: bool,
 }
 
-impl ClarisFuse {
+impl IzeFuse {
     pub async fn execute_dvcs_command(&self, cmd: VoiceDVCSCommand) -> Result<()> {
         // Validate command safety
         if cmd.requires_confirmation {
             self.request_voice_confirmation().await?;
         }
-        
-        // Execute native Claris-Fuse DVCS operations
+
+        // Execute native Ize DVCS operations
         match cmd.command {
             DVCSOperation::Status => {
                 let changes = self.get_working_tree_changes().await?;
@@ -201,15 +201,15 @@ impl ClarisFuse {
             // ... other DVCS operations implemented natively
         }
     }
-    
+
     // Native DVCS operations as part of the filesystem
     async fn get_working_tree_changes(&self) -> Result<Vec<Change>> {
         // Compare current state with last snapshot
         self.diff_with_head().await
     }
-    
+
     async fn record_changes(&self, snapshot: Snapshot, message: &str) -> Result<ChangeId> {
-        // Create a new change record in the Claris-Fuse history
+        // Create a new change record in the Ize history
         let change = Change {
             id: ChangeId::new(),
             snapshot,
@@ -279,10 +279,10 @@ pub struct AmbiguityResolver {
         if let Some(exact) = self.find_exact_match(query) {
             return FileResolution::Exact(exact);
         }
-        
+
         // Fuzzy search with scoring
         let candidates = self.fuzzy_search(query);
-        
+
         match candidates.len() {
             0 => FileResolution::NotFound,
             1 => FileResolution::Single(candidates[0]),
@@ -328,12 +328,12 @@ impl VoiceCommandCache {
         if let Some(cached) = self.get_recent_similar(query) {
             return Some(cached);
         }
-        
+
         // Check user's custom shortcuts
         if let Some(shortcut) = self.user_shortcuts.get(query) {
             return Some(shortcut.expand());
         }
-        
+
         None
     }
 }
@@ -345,10 +345,10 @@ impl VoiceCommandCache {
 ```rust
 pub struct PredictiveLoader {
     command_sequences: MarkovChain<VoiceCommand>,
-    
+
     pub async fn preload_likely_files(&self, current_command: &VoiceCommand) {
         let predictions = self.command_sequences.predict_next(current_command);
-        
+
         for (command, probability) in predictions {
             if probability > 0.3 {
                 if let Some(file) = command.target_file() {
@@ -396,11 +396,11 @@ pub struct VoiceStreamingSession {
         S: Stream<Item = ExecutionUpdate>,
     {
         let (tx, rx) = mpsc::channel(32);
-        
+
         tokio::spawn(async move {
             // Send progress updates
             tx.send(ExecutionUpdate::Starting).await;
-            
+
             match command.execute().await {
                 Ok(result) => {
                     tx.send(ExecutionUpdate::Progress(50)).await;
@@ -410,7 +410,7 @@ pub struct VoiceStreamingSession {
                 Err(e) => tx.send(ExecutionUpdate::Error(e)).await,
             }
         });
-        
+
         ReceiverStream::new(rx)
     }
 }
@@ -428,7 +428,7 @@ pub struct VoiceSecurityValidator {
         if self.is_destructive(command) && !self.has_explicit_confirmation(command) {
             return ValidationResult::RequiresConfirmation;
         }
-        
+
         // Validate paths are within project
         if let Some(paths) = command.affected_paths() {
             for path in paths {
@@ -437,7 +437,7 @@ pub struct VoiceSecurityValidator {
                 }
             }
         }
-        
+
         ValidationResult::Allowed
     }
 }
@@ -457,7 +457,7 @@ pub struct VoiceAuditLog {
             result: entry.result,
             affected_files: entry.affected_files,
         };
-        
+
         self.persist_to_log(record).await;
     }
 }
@@ -485,4 +485,4 @@ pub struct VoiceAuditLog {
 
 ## Conclusion
 
-Voice command integration with Claris-Fuse opens up powerful new workflows for developers. By mapping natural language to filesystem operations and maintaining context across commands, we can create an intuitive voice-driven development environment that enhances rather than replaces traditional interfaces.
+Voice command integration with Ize opens up powerful new workflows for developers. By mapping natural language to filesystem operations and maintaining context across commands, we can create an intuitive voice-driven development environment that enhances rather than replaces traditional interfaces.

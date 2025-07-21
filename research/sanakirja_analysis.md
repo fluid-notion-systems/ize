@@ -1,4 +1,4 @@
-# Sanakirja Analysis for Claris-FUSE
+# Sanakirja Analysis for Ize
 
 ## Overview
 
@@ -7,7 +7,7 @@ Sanakirja is a transactional, copy-on-write B-tree data structure library writte
 - **ACID transactions** with MVCC (Multi-Version Concurrency Control)
 - **Copy-on-write semantics** perfect for versioning
 - **Memory-mapped files** for performance
-- **Zero-copy deserialization** 
+- **Zero-copy deserialization**
 - **Crash resistance** with atomic commits
 
 ## Architecture Analysis
@@ -20,7 +20,7 @@ Sanakirja is a transactional, copy-on-write B-tree data structure library writte
 4. **Pages** - Fixed-size blocks in the file (typically 4KB)
 5. **Roots** - Named entry points to B-trees
 
-### Key Features for Claris-FUSE
+### Key Features for Ize
 
 1. **Built-in Versioning**: Each transaction creates a new version
 2. **Efficient Snapshots**: Copy-on-write makes snapshots cheap
@@ -134,19 +134,19 @@ pub enum OperationData {
 pub trait VersionedStorage: Send + Sync {
     /// Initialize a new storage backend
     fn new(path: &Path) -> Result<Self> where Self: Sized;
-    
+
     /// Record a filesystem operation
     fn record_operation(&mut self, op: Operation) -> Result<Version>;
-    
+
     /// Get file content at a specific version
     fn get_file_at_version(&self, path: &str, version: Version) -> Result<Vec<u8>>;
-    
+
     /// List all versions for a file
     fn list_versions(&self, path: &str) -> Result<Vec<(Version, Operation)>>;
-    
+
     /// Get the latest version number
     fn latest_version(&self) -> Version;
-    
+
     /// Begin a new transaction (for batch operations)
     fn begin_transaction(&mut self) -> Result<Transaction>;
 }

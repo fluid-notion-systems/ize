@@ -1,11 +1,11 @@
 use fuser::{BackgroundSession, MountOption};
-use ize::{PassthroughFS, Storage};
+use ize_lib::filesystems::passthrough::PassthroughFS;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 use tempfile::{tempdir, TempDir};
 
 /// Integration test harness for operation tracking
@@ -32,13 +32,12 @@ impl OperationTrackingHarness {
 
     fn mount(mut self) -> io::Result<Self> {
         // Create the filesystem instance
-        let fs = PassthroughFS::new(self.source_dir.path().to_path_buf(), self.db_path.clone())?;
+        let fs = PassthroughFS::new(self.db_path.clone(), self.mount_dir.path())?;
 
         let mount_path = self.mount_dir.path().to_path_buf();
         let options = vec![
             MountOption::FSName("ize-test".to_string()),
             MountOption::AutoUnmount,
-            MountOption::AllowOther,
         ];
 
         // Mount the filesystem in background
@@ -60,7 +59,7 @@ impl OperationTrackingHarness {
     }
 
     /// Get the storage instance to check tracked operations
-    fn get_storage(&self) -> io::Result<Box<dyn Storage>> {
+    fn get_storage(&self) -> io::Result<()> {
         // This would connect to the actual storage backend
         // For now, we'll check the filesystem state
         unimplemented!("Storage access implementation needed")
@@ -445,16 +444,19 @@ fn test_complex_file_operations_all_tracked() {
 
 #[test]
 fn test_concurrent_operations_all_tracked() {
-    use std::sync::Arc;
-    let harness = Arc::new(OperationTrackingHarness::new().unwrap().mount().unwrap());
+    let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
+
+    // Extract paths before spawning threads
+    let mount_path = harness.mount_path().to_path_buf();
+    let source_path = harness.source_path().to_path_buf();
 
     // Spawn multiple threads performing operations
     let handles: Vec<_> = (0..5)
         .map(|i| {
-            let harness = Arc::clone(&harness);
+            let mount_path = mount_path.clone();
             thread::spawn(move || {
                 let file_name = format!("concurrent_{}.txt", i);
-                let file_path = harness.mount_path().join(&file_name);
+                let file_path = mount_path.join(&file_name);
 
                 // Create file
                 fs::write(&file_path, format!("Thread {} content", i)).unwrap();
@@ -464,7 +466,7 @@ fn test_concurrent_operations_all_tracked() {
                 fs::write(&file_path, format!("Thread {} modified", i)).unwrap();
 
                 // Create subdirectory
-                let dir_path = harness.mount_path().join(format!("thread_{}_dir", i));
+                let dir_path = mount_path.join(format!("thread_{}_dir", i));
                 fs::create_dir(&dir_path).unwrap();
             })
         })
@@ -479,13 +481,13 @@ fn test_concurrent_operations_all_tracked() {
 
     // Verify all operations completed
     for i in 0..5 {
-        let file_path = harness.source_path().join(format!("concurrent_{}.txt", i));
+        let file_path = source_path.join(format!("concurrent_{}.txt", i));
         assert!(file_path.exists());
 
         let content = fs::read(&file_path).unwrap();
         assert_eq!(content, format!("Thread {} modified", i).as_bytes());
 
-        let dir_path = harness.source_path().join(format!("thread_{}_dir", i));
+        let dir_path = source_path.join(format!("thread_{}_dir", i));
         assert!(dir_path.exists() && dir_path.is_dir());
     }
 }

@@ -1,4 +1,4 @@
-# Test Reorganization Plan for Claris-FUSE
+# Test Reorganization Plan for Ize
 
 ## Current Structure
 Currently, our tests are spread across several files in the `tests/` directory without clear categorization, and we also have some unit tests embedded in source files using `#[cfg(test)]`. This makes it difficult to identify the purpose of each test, run specific test categories, and maintain proper test isolation.
@@ -7,7 +7,7 @@ Currently, our tests are spread across several files in the `tests/` directory w
 We'll reorganize tests into the following structure. Since Cargo's test discovery works best with top-level test files, we'll use a tagging system with consistent prefixes for better organization:
 
 ```
-claris-fuse-lib/
+Ize-lib/
 ├── src/
 │   └── ... (source files with embedded unit tests using #[cfg(test)])
 ├── tests/

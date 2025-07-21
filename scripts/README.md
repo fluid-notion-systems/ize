@@ -1,4 +1,4 @@
-# Claris-FUSE Nu Shell Scripts
+# Ize Nu Shell Scripts
 
 This directory contains Nu shell scripts for development workflow automation.
 
@@ -80,10 +80,10 @@ Add to your Nu config (`$nu.config-path`):
 
 ```nu
 # Quick development commands
-alias dw = nu ~/path/to/claris-fuse/scripts/w.nu
-alias dt = nu ~/path/to/claris-fuse/scripts/dev.nu test
-alias db = nu ~/path/to/claris-fuse/scripts/dev.nu build
-alias dc = nu ~/path/to/claris-fuse/scripts/dev.nu check
+alias dw = nu ~/path/to/Ize/scripts/w.nu
+alias dt = nu ~/path/to/Ize/scripts/dev.nu test
+alias db = nu ~/path/to/Ize/scripts/dev.nu build
+alias dc = nu ~/path/to/Ize/scripts/dev.nu check
 ```
 
 ## Watch Modes

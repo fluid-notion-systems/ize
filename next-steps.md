@@ -1,4 +1,4 @@
-# Claris-FUSE Next Steps
+# Ize Next Steps
 
 ## Current Status (Storage Refactor Branch)
 
@@ -34,10 +34,10 @@
 - [ ] Benchmark tests for performance baseline
 
 ### 4. CLI Commands
-- [ ] Implement `claris-fuse history <path>`
-- [ ] Implement `claris-fuse restore <path> --version=N`
-- [ ] Add `claris-fuse status` to show tracked changes
-- [ ] Create `claris-fuse diff` for comparing versions
+- [ ] Implement `Ize history <path>`
+- [ ] Implement `Ize restore <path> --version=N`
+- [ ] Add `Ize status` to show tracked changes
+- [ ] Create `Ize diff` for comparing versions
 
 ## Development Roadmap
 

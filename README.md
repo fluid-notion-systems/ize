@@ -1,10 +1,10 @@
-# Claris-FUSE
+# Ize
 
-A version-controlled filesystem implemented with FUSE in Rust. 
+A version-controlled filesystem implemented with FUSE in Rust.
 
-## What is Claris-FUSE?
+## What is Ize?
 
-Claris-FUSE tracks every change to your files automatically, like Git but at the filesystem level. Mount a directory, and all file operations are transparently versioned - no commits needed.
+Ize tracks every change to your files automatically, like Git but at the filesystem level. Mount a directory, and all file operations are transparently versioned - no commits needed.
 
 ## Quick Start
 
@@ -19,8 +19,8 @@ Claris-FUSE tracks every change to your files automatically, like Git but at the
 ### Building
 
 ```bash
-git clone https://github.com/claris-assistant/claris-fuse.git
-cd claris-fuse
+git clone https://github.com/fluid-notion-systems/Ize.git
+cd Ize
 cargo build --release
 ```
 
@@ -28,10 +28,10 @@ cargo build --release
 
 ```bash
 # Initialize a directory for version control
-claris-fuse init /path/to/directory
+Ize init /path/to/directory
 
 # Mount the filesystem
-claris-fuse mount /path/to/directory /mount/point
+Ize mount /path/to/directory /mount/point
 
 # Use the mounted filesystem normally - all changes are tracked!
 

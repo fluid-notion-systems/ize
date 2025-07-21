@@ -1,8 +1,8 @@
-# Claris-FUSE Test Plan
+# Ize Test Plan
 
 ## Overview
 
-This document outlines the comprehensive testing strategy for Claris-FUSE, organized by test type and component. All tests will use the harness framework to eliminate duplication and ensure consistency.
+This document outlines the comprehensive testing strategy for Ize, organized by test type and component. All tests will use the harness framework to eliminate duplication and ensure consistency.
 
 ## Test Categories
 

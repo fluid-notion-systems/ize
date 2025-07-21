@@ -1,6 +1,6 @@
 #!/usr/bin/env nu
 
-# Claris-FUSE Development Tools for Nu Shell
+# Ize Development Tools for Nu Shell
 # A comprehensive development script with watch functionality
 
 # Custom type for watch events
@@ -86,9 +86,9 @@ def "dev watch" [
     check-tools
 
     let root = get-project-root
-    cd $"($root)/crates/claris-fuse-lib"
+    cd $"($root)/crates/Ize-lib"
 
-    print $"(ansi blue)◆ Starting Claris-FUSE watch mode(ansi reset)"
+    print $"(ansi blue)◆ Starting Ize watch mode(ansi reset)"
     print $"  (ansi dim)Project root: ($root)(ansi reset)"
 
     if $test_only {
@@ -148,7 +148,7 @@ def "dev test" [
     --watch(-w)      # Watch mode
     --nextest(-n)    # Use cargo-nextest
 ] {
-    cd $"(get-project-root)/crates/claris-fuse-lib"
+    cd $"(get-project-root)/crates/Ize-lib"
 
     let cmd = if $nextest { "cargo nextest run" } else { "cargo test" }
     let full_cmd = if ($filter | is-empty) { $cmd } else { $"($cmd) ($filter)" }
@@ -166,7 +166,7 @@ def "dev build" [
     --watch(-w)      # Watch mode
     --features(-f): string  # Features to enable
 ] {
-    cd $"(get-project-root)/crates/claris-fuse-lib"
+    cd $"(get-project-root)/crates/Ize-lib"
 
     mut cmd_parts = ["cargo", "build"]
     if $release { $cmd_parts = ($cmd_parts | append "--release") }
@@ -188,7 +188,7 @@ def "dev clippy" [
     --watch(-w)      # Watch mode
     --fix            # Auto-fix issues
 ] {
-    cd $"(get-project-root)/crates/claris-fuse-lib"
+    cd $"(get-project-root)/crates/Ize-lib"
 
     let cmd = if $fix {
         "cargo clippy --fix --allow-dirty --allow-staged"
@@ -279,7 +279,7 @@ def "dev clean" [
 def "dev stats" [] {
     cd get-project-root
 
-    print $"(ansi blue)◆ Claris-FUSE Project Statistics(ansi reset)\n"
+    print $"(ansi blue)◆ Ize Project Statistics(ansi reset)\n"
 
     # Count lines of code
     let rust_files = (ls **/*.rs | where type == "file")
@@ -319,7 +319,7 @@ def "dev stats" [] {
 
 # Main help
 def "dev" [] {
-    print $"(ansi blue)◆ Claris-FUSE Development Tools(ansi reset)\n"
+    print $"(ansi blue)◆ Ize Development Tools(ansi reset)\n"
     print "Available commands:\n"
 
     let commands = [

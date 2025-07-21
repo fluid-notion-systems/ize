@@ -80,7 +80,7 @@ File: "Hello World"
 
 Stored as:
 Vertex₁: "Hello"
-Vertex₂: " "  
+Vertex₂: " "
 Vertex₃: "World"
 
 Edge₁: (Vertex₁ → Vertex₂, patch=abc123, state=alive)
@@ -88,7 +88,7 @@ Edge₂: (Vertex₂ → Vertex₃, patch=abc123, state=alive)
 ```
 
 When you delete "World" and add "Universe":
-- Edge₂ becomes `state=dead` 
+- Edge₂ becomes `state=dead`
 - New Vertex₄: "Universe"
 - New Edge₃: (Vertex₂ → Vertex₄, patch=def456, state=alive)
 
@@ -149,7 +149,7 @@ Sanakirja includes its own page allocator that:
 // Simplified view of allocation
 pub struct Allocator {
     free_list: Db<u64, ()>,    // Free page numbers
-    allocated: Db<u64, ()>,    // Allocated page numbers  
+    allocated: Db<u64, ()>,    // Allocated page numbers
     root_page: u64,            // Where everything starts
 }
 ```
@@ -171,7 +171,7 @@ write_txn.commit()?;  // Atomically updates root pointer
 
 This is **snapshot isolation** without the overhead of copying data. Each transaction gets its own view of reality, and reality only updates when someone commits.
 
-## Why This Matters for Claris-FUSE
+## Why This Matters for Ize
 
 ### Perfect Fit for Filesystem Versioning
 
@@ -183,17 +183,17 @@ This is **snapshot isolation** without the overhead of copying data. Each transa
 ### Storage Schema for Filesystem Operations
 
 ```rust
-// Proposed Claris-FUSE storage using Sanakirja primitives
-pub struct ClarisStorage {
+// Proposed Ize storage using Sanakirja primitives
+pub struct IzeStorage {
     // Core file system state
     files: Db<PathId, FileRecord>,
     directories: Db<PathId, DirectoryRecord>,
     content: Db<ContentHash, Vec<u8>>,
-    
-    // Version control layer  
+
+    // Version control layer
     file_patches: Db<PathId, PatchSet>,
     patch_graph: Db<PatchId, PatchNode>,
-    
+
     // Indexes for fast queries
     path_to_id: Db<String, PathId>,
     content_refs: Db<ContentHash, Vec<PathId>>,
@@ -207,7 +207,7 @@ pub struct FileRecord {
     patch_id: PatchId,  // Last patch that modified this file
 }
 
-#[derive(Clone)]  
+#[derive(Clone)]
 pub struct PatchNode {
     patch_type: PatchType,
     dependencies: Vec<PatchId>,
@@ -220,31 +220,31 @@ pub struct PatchNode {
 
 ```rust
 // Creating a filesystem snapshot is just forking the storage
-impl ClarisStorage {
-    pub fn create_snapshot(&self) -> Result<ClarisStorage> {
+impl IzeStorage {
+    pub fn create_snapshot(&self) -> Result<IzeStorage> {
         let mut txn = self.env.mut_txn_begin()?;
-        
-        Ok(ClarisStorage {
+
+        Ok(IzeStorage {
             files: txn.fork(&mut self.rng, &self.files)?,
             directories: txn.fork(&mut self.rng, &self.directories)?,
             content: txn.fork(&mut self.rng, &self.content)?,
             // ... fork all tables
         })
     }
-    
+
     pub fn apply_opcode(&mut self, opcode: OpCode) -> Result<PatchId> {
         let mut txn = self.env.mut_txn_begin()?;
-        
+
         // Convert filesystem operation to patch
         let patch = self.opcode_to_patch(opcode)?;
-        
+
         // Store patch in graph structure
         let patch_id = self.next_patch_id();
         txn.put(&mut self.patch_graph, patch_id, patch)?;
-        
+
         // Update file/directory state
         self.apply_patch_to_state(&mut txn, patch_id, &patch)?;
-        
+
         txn.commit()?;
         Ok(patch_id)
     }
@@ -267,14 +267,14 @@ Pijul's approach to storage is like asking: "What if we built a database where e
 
 The answer is Sanakirja: a storage engine that treats data like patches, patches like mathematical objects, and mathematical objects like first-class citizens in a functional programming language.
 
-## Extracting Sanakirja for Claris-FUSE
+## Extracting Sanakirja for Ize
 
 ### The Liberation Strategy
 
 1. **Extract Core Components**:
    ```bash
    # From Pijul repository
-   cp -r libpijul/src/pristine/sanakirja ./claris-storage/
+   cp -r libpijul/src/pristine/sanakirja ./ize-storage/
    ```
 
 2. **Simplify the API**:
@@ -283,7 +283,7 @@ The answer is Sanakirja: a storage engine that treats data like patches, patches
    pub struct FileSystemDB {
        sanakirja_env: sanakirja::Env,
    }
-   
+
    impl FileSystemDB {
        pub fn store_file_operation(&mut self, op: FileOperation) -> Result<()>;
        pub fn get_file_at_time(&self, path: &Path, time: Timestamp) -> Result<FileContent>;
@@ -299,7 +299,7 @@ The answer is Sanakirja: a storage engine that treats data like patches, patches
 
 ### The Beautiful Madness Continues
 
-Using Pijul's storage for a filesystem is like using a Formula 1 race car as your daily driver: 
+Using Pijul's storage for a filesystem is like using a Formula 1 race car as your daily driver:
 - Completely overkill for most operations
 - Absolutely perfect for the operations that matter
 - Makes you feel like you're living in the future

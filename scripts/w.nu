@@ -1,10 +1,10 @@
 #!/usr/bin/env nu
 
-# Simple watch script for Claris-FUSE
+# Simple watch script for Ize
 # Run from project root: nu scripts/w.nu
 
 # Just cd to the right directory and run cargo watch
-cd crates/claris-fuse-lib
+cd crates/Ize-lib
 
 print "Starting watch mode..."
 print "• Test files → cargo test"

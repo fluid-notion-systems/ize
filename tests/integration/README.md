@@ -1,4 +1,4 @@
-# Claris-FUSE Integration Tests
+# Ize Integration Tests
 
 This directory contains integration tests that mount the actual filesystem using FUSE and verify that operations are correctly tracked and persisted.
 
@@ -39,7 +39,7 @@ The tests use a harness-based approach to eliminate boilerplate:
 struct FilesystemMountHarness {
     source_dir: TempDir,      // Source directory being versioned
     mount_dir: TempDir,       // Mount point for FUSE filesystem
-    db_path: PathBuf,         // Path to Claris database
+    db_path: PathBuf,         // Path to Ize database
     _session: BackgroundSession, // FUSE session handle
 }
 ```
@@ -54,7 +54,7 @@ Key features:
 
 1. **Setup Phase**:
    - Create temporary directories for source and mount
-   - Initialize the Claris database file
+   - Initialize the Ize database file
    - Create PassthroughFS instance
    - Mount filesystem using `fuser::spawn_mount2`
 
@@ -98,16 +98,16 @@ cargo test --test operation_tracking_test -- --nocapture
 #[test]
 fn test_file_create_operation_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
-    
+
     // Perform operation through mount
     fs::write(harness.mount_path().join("file.txt"), b"content").unwrap();
-    
+
     // Wait for FUSE to process
     thread::sleep(Duration::from_millis(100));
-    
+
     // Verify in source
     assert!(harness.source_path().join("file.txt").exists());
-    
+
     // Verify tracked
     assert!(harness.verify_operation_tracked(Path::new("file.txt"), "create"));
 }
@@ -118,7 +118,7 @@ fn test_file_create_operation_tracked() {
 #[test]
 fn test_complex_operations() {
     let harness = Harness::new().mount();
-    
+
     harness.test_write_operations(|ctx| {
         ctx.write_file("doc.txt", b"content").unwrap();
         ctx.append_file("doc.txt", b" more").unwrap();

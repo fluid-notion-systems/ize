@@ -192,12 +192,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f46ad14479a25103f283c0f10005961cf086d8dc42205bb44c46ac563475dca6"
 
 [[package]]
-name = "claris-fuse"
+name = "ize"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "claris-fuse-lib",
+ "ize-lib",
  "ctrlc",
  "env_logger",
  "fuser",
@@ -205,7 +205,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "claris-fuse-lib"
+name = "ize-lib"
 version = "0.1.0"
 dependencies = [
  "clap",

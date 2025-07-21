@@ -1,6 +1,6 @@
-# Claris-FUSE Research Index
+# Ize Research Index
 
-This directory contains research and analysis for the Claris-FUSE project, organized by implementation priority and topic area.
+This directory contains research and analysis for the Ize project, organized by implementation priority and topic area.
 
 ## Implementation Roadmap
 

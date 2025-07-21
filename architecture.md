@@ -1,8 +1,8 @@
-# Claris-FUSE Architecture
+# Ize Architecture
 
 ## Overview
 
-Claris-FUSE is a version-controlled filesystem implemented with FUSE in Rust. It maintains a linear history of file operations (create/update/delete) similar to Git but at the filesystem level, tracking changes to files over time and allowing users to view and restore previous versions.
+Ize is a version-controlled filesystem implemented with FUSE in Rust. It maintains a linear history of file operations (create/update/delete) similar to Git but at the filesystem level, tracking changes to files over time and allowing users to view and restore previous versions.
 
 ## Core Philosophy
 
@@ -222,28 +222,28 @@ CREATE TABLE content (
 
 ### Initialization
 ```bash
-claris-fuse init /path/to/directory
+Ize init /path/to/directory
 ```
 
 ### Mounting
 ```bash
 # Standard mount
-claris-fuse mount /initialized/directory /mount/point
+Ize mount /initialized/directory /mount/point
 
 # Read-only mount
-claris-fuse mount --read-only /initialized/directory /mount/point
+Ize mount --read-only /initialized/directory /mount/point
 ```
 
 ### History Operations (Planned)
 ```bash
 # View file history
-claris-fuse history /mount/point/file.txt
+Ize history /mount/point/file.txt
 
 # Restore specific version
-claris-fuse restore /mount/point/file.txt --version=3
+Ize restore /mount/point/file.txt --version=3
 
 # Create snapshot
-claris-fuse snapshot create --name="before-refactor"
+Ize snapshot create --name="before-refactor"
 ```
 
 ## Development Practices
@@ -272,7 +272,6 @@ claris-fuse snapshot create --name="before-refactor"
 
 ### Voice Integration
 - Natural language filesystem operations
-- Integration with Claris Mobile
 - Voice-driven version control
 
 ### Distributed Features
