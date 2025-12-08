@@ -1,5 +1,5 @@
 [package]
-name = "Ize-lib"
+name = "ize-lib"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
