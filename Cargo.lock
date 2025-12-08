@@ -192,37 +192,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f46ad14479a25103f283c0f10005961cf086d8dc42205bb44c46ac563475dca6"
 
 [[package]]
-name = "ize"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "ize-lib",
- "ctrlc",
- "env_logger",
- "fuser",
- "log",
-]
-
-[[package]]
-name = "ize-lib"
-version = "0.1.0"
-dependencies = [
- "clap",
- "criterion",
- "env_logger",
- "fuser",
- "libc",
- "log",
- "more-asserts",
- "nix 0.30.1",
- "proptest",
- "serial_test",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -529,6 +498,37 @@ name = "itoa"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
+
+[[package]]
+name = "ize"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "env_logger",
+ "fuser",
+ "ize-lib",
+ "log",
+]
+
+[[package]]
+name = "ize-lib"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "criterion",
+ "env_logger",
+ "fuser",
+ "libc",
+ "log",
+ "more-asserts",
+ "nix 0.30.1",
+ "proptest",
+ "serial_test",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "js-sys"
