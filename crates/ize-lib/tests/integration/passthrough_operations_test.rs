@@ -1,4 +1,4 @@
-//! Integration tests for PassthroughFS2 operations.
+//! Integration tests for PassthroughFS operations.
 //!
 //! These tests verify the filesystem behavior by testing the actual
 //! file operations that would happen through the FUSE layer.
@@ -6,14 +6,14 @@
 use std::fs;
 use tempfile::TempDir;
 
-use ize_lib::filesystems::passthrough2::PassthroughFS2;
+use ize_lib::filesystems::passthrough::PassthroughFS;
 
-/// Test helper to create a PassthroughFS2 instance with temp directories
-fn setup_test_fs() -> (PassthroughFS2, TempDir, TempDir) {
+/// Test helper to create a PassthroughFS instance with temp directories
+fn setup_test_fs() -> (PassthroughFS, TempDir, TempDir) {
     let source_dir = tempfile::tempdir().unwrap();
     let mount_dir = tempfile::tempdir().unwrap();
 
-    let fs = PassthroughFS2::new(source_dir.path(), mount_dir.path()).unwrap();
+    let fs = PassthroughFS::new(source_dir.path(), mount_dir.path()).unwrap();
 
     (fs, source_dir, mount_dir)
 }
@@ -238,25 +238,25 @@ fn test_operations_tracking_points() {
     // This test documents where we would intercept operations for versioning
 
     let operations_to_intercept = vec![
-        ("create", "When PassthroughFS2::create is called"),
-        ("write", "When PassthroughFS2::write is called"),
-        ("unlink", "When PassthroughFS2::unlink is called"),
-        ("rename", "When PassthroughFS2::rename is called"),
-        ("mkdir", "When PassthroughFS2::mkdir is called"),
-        ("rmdir", "When PassthroughFS2::rmdir is called"),
-        ("setattr", "When PassthroughFS2::setattr is called"),
+        ("create", "When PassthroughFS::create is called"),
+        ("write", "When PassthroughFS::write is called"),
+        ("unlink", "When PassthroughFS::unlink is called"),
+        ("rename", "When PassthroughFS::rename is called"),
+        ("mkdir", "When PassthroughFS::mkdir is called"),
+        ("rmdir", "When PassthroughFS::rmdir is called"),
+        ("setattr", "When PassthroughFS::setattr is called"),
         (
             "truncate",
-            "When PassthroughFS2::setattr is called with size change",
+            "When PassthroughFS::setattr is called with size change",
         ),
-        ("symlink", "When PassthroughFS2::symlink is called"),
-        ("link", "When PassthroughFS2::link is called"),
+        ("symlink", "When PassthroughFS::symlink is called"),
+        ("link", "When PassthroughFS::link is called"),
     ];
 
     // This is a documentation test
     assert_eq!(operations_to_intercept.len(), 10);
 
-    // In the actual implementation, each of these PassthroughFS2 methods
+    // In the actual implementation, each of these PassthroughFS methods
     // would call into our storage layer to record the operation before
     // or after performing the actual filesystem operation.
 }

@@ -1,5 +1,5 @@
 use fuser::{BackgroundSession, MountOption};
-use ize_lib::filesystems::passthrough2::PassthroughFS2;
+use ize_lib::filesystems::passthrough::PassthroughFS;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -29,7 +29,7 @@ impl OperationTrackingHarness {
 
     fn mount(mut self) -> io::Result<Self> {
         // Create the filesystem instance
-        let fs = PassthroughFS2::new(self.source_dir.path(), self.mount_dir.path())?;
+        let fs = PassthroughFS::new(self.source_dir.path(), self.mount_dir.path())?;
 
         let mount_path = self.mount_dir.path().to_path_buf();
         let options = vec![

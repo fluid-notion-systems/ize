@@ -6,7 +6,7 @@
 use std::fs;
 use std::sync::{Arc, Mutex};
 
-use ize_lib::filesystems::passthrough2::PassthroughFS2;
+use ize_lib::filesystems::passthrough::PassthroughFS;
 
 /// Simple operation recorder for testing
 #[derive(Debug, Clone)]
@@ -67,7 +67,7 @@ mod tests {
     #[test]
     fn test_operation_recording_concept() {
         // This test demonstrates the concept of recording operations
-        // In the real implementation, this would be integrated into PassthroughFS2
+        // In the real implementation, this would be integrated into PassthroughFS
 
         let recorder = OperationRecorder::new();
 
@@ -104,8 +104,8 @@ mod tests {
             let source_dir = ctx.source_dir.unwrap();
             let mount_dir = ctx.mount_dir.unwrap();
 
-            // Create a PassthroughFS2 instance
-            let _fs = PassthroughFS2::new(source_dir, mount_dir).unwrap();
+            // Create a PassthroughFS instance
+            let _fs = PassthroughFS::new(source_dir, mount_dir).unwrap();
 
             // The filesystem is created but not mounted in this test
             // This allows us to test the setup without dealing with FUSE mounting
@@ -143,7 +143,7 @@ mod tests {
         // This is more of a documentation test
         assert_eq!(operations_to_track.len(), 10);
 
-        // In the actual implementation, each of these operations in PassthroughFS2
+        // In the actual implementation, each of these operations in PassthroughFS
         // would call into our storage layer to record the operation
     }
 

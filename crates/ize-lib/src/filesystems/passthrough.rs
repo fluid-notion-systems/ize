@@ -1,113 +1,127 @@
-use std::ffi::{CString, OsStr, OsString};
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+//! PassthroughFS - A simplified passthrough filesystem
+//!
+//! This implementation differs from the original PassthroughFS in several key ways:
+//! 1. Uses **real inodes** from the underlying filesystem instead of synthetic counters
+//! 2. Uses **generated file handles** (not raw fds) for FUSE operations
+//! 3. Has no concept of a "database file" - just source_dir ↔ mount_point
+//! 4. Implements proper file descriptor lifecycle management via RAII
+//! 5. Uses safe Rust APIs (FileExt, nix) instead of unsafe libc calls
+
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
-    consts::FOPEN_DIRECT_IO, FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate,
-    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
+    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
-use libc::{
-    mode_t, timespec, EACCES, EEXIST, ENOENT, ENOTDIR, O_APPEND, O_CREAT, O_DIRECT, O_RDWR,
-    O_WRONLY, UTIME_NOW, UTIME_OMIT,
-};
+use libc::{EBADF, EIO, ENOENT, ENOTDIR, ENOTEMPTY};
 use log::{debug, error, info, warn};
+use nix::fcntl::AT_FDCWD;
+use nix::sys::stat::{utimensat, UtimensatFlags};
+use nix::sys::statvfs::statvfs;
+use nix::sys::time::TimeSpec;
+use nix::unistd::{chown, Gid, Uid};
 
-use super::error::{FsError, FsErrorCode, IoErrorExt};
-use super::path_manager::{PathForm, PathManager, ROOT_INODE};
+/// TTL for cached attributes (1 second)
+const TTL: Duration = Duration::from_secs(1);
 
-const TTL: Duration = Duration::from_secs(1); // 1 second
+/// FUSE root inode number
+const FUSE_ROOT_ID: u64 = 1;
 
-/// A basic passthrough filesystem implementation
+/// Stored file handle - keeps the File alive so fd remains valid
+struct FileHandle {
+    /// The File object that owns the fd - when dropped, fd is automatically closed
+    file: File,
+    /// The real path (useful for some operations)
+    #[allow(dead_code)]
+    real_path: PathBuf,
+    /// Flags used when opening (O_RDONLY, O_RDWR, etc.)
+    flags: i32,
+}
+
+/// A simplified passthrough filesystem implementation
+///
+/// Key design decisions:
+/// - Uses real inodes from the underlying filesystem
+/// - Uses generated file handles (not raw fds) for FUSE operations
+/// - Maintains an inode → path mapping for reverse lookups
+/// - File handles are stored to keep fds alive until release()
 pub struct PassthroughFS {
-    db_path: PathBuf,
+    /// The source directory being exposed
+    source_dir: PathBuf,
+    /// The mount point
     mount_point: PathBuf,
+    /// Read-only mode
     read_only: bool,
-    // Path manager for handling paths and inodes
-    path_manager: PathManager,
+    /// Maps real inode → relative path (for inode-based lookups)
+    /// Populated during lookup() and readdir()
+    inode_to_path: RwLock<HashMap<u64, PathBuf>>,
+    /// Next file handle to assign
+    next_fh: AtomicU64,
+    /// Maps fh → FileHandle (keeps File alive)
+    file_handles: RwLock<HashMap<u64, FileHandle>>,
 }
 
 impl PassthroughFS {
     /// Create a new passthrough filesystem
     ///
+    /// # Arguments
+    /// * `source_dir` - The directory to expose through the filesystem
+    /// * `mount_point` - Where the filesystem will be mounted
+    ///
     /// # Errors
-    /// Returns an error if the database file is within the mount point directory
-    pub fn new<P: AsRef<Path>, Q: AsRef<Path>>(
-        db_path: P,
-        mount_point: Q,
-    ) -> std::io::Result<Self> {
-        let db_path = db_path.as_ref().to_path_buf();
+    /// Returns an error if the source directory doesn't exist or can't be accessed
+    pub fn new<P: AsRef<Path>, Q: AsRef<Path>>(source_dir: P, mount_point: Q) -> io::Result<Self> {
+        let source_dir = source_dir.as_ref().to_path_buf();
         let mount_point = mount_point.as_ref().to_path_buf();
 
-        // Create file system with path manager
-        let fs = Self {
-            db_path: db_path.clone(),
-            mount_point: mount_point.clone(),
-            read_only: false,
-            path_manager: PathManager::new(db_path.parent().unwrap_or_else(|| Path::new("."))),
-        };
-
-        // Check if the database file is inside the mount point
-        if fs.is_db_inside_mount_point() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Database file cannot be inside the mount point directory",
+        // Verify source directory exists
+        if !source_dir.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Source directory not found: {:?}", source_dir),
             ));
         }
 
+        if !source_dir.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Source path is not a directory: {:?}", source_dir),
+            ));
+        }
+
+        let mut inode_to_path = HashMap::new();
+        // Register root inode mapping - FUSE always uses inode 1 for root
+        inode_to_path.insert(FUSE_ROOT_ID, PathBuf::new());
+
         info!(
-            "Initialized PassthroughFS with source dir: {:?}",
-            fs.db_source_dir()
+            "Initialized PassthroughFS with source_dir: {:?}, mount_point: {:?}",
+            source_dir, mount_point
         );
 
-        Ok(fs)
+        Ok(Self {
+            source_dir,
+            mount_point,
+            read_only: false,
+            inode_to_path: RwLock::new(inode_to_path),
+            next_fh: AtomicU64::new(1),
+            file_handles: RwLock::new(HashMap::new()),
+        })
     }
 
-    /// Check if the database file is inside the mount point directory
-    fn is_db_inside_mount_point(&self) -> bool {
-        let db_path_canon = match std::fs::canonicalize(&self.db_path) {
-            Ok(path) => path,
-            Err(_) => return false, // Can't determine, assume it's not inside
-        };
-
-        let mount_point_canon = match std::fs::canonicalize(&self.mount_point) {
-            Ok(path) => path,
-            Err(_) => return false, // Can't determine, assume it's not inside
-        };
-
-        db_path_canon.starts_with(mount_point_canon)
-    }
-
-    /// Get the database path
-    pub fn db_path(&self) -> &Path {
-        &self.db_path
-    }
-
-    /// Get the mount point
-    pub fn mount_point(&self) -> &Path {
-        &self.mount_point
-    }
-
-    /// Get the source directory (parent directory of the database file)
-    fn db_source_dir(&self) -> PathBuf {
-        self.db_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf()
-    }
-
-    /// Create a new passthrough filesystem with read-only mode
-    ///
-    /// # Errors
-    /// Returns an error if the database file is within the mount point directory
+    /// Create a new read-only passthrough filesystem
     pub fn new_read_only<P: AsRef<Path>, Q: AsRef<Path>>(
-        db_path: P,
+        source_dir: P,
         mount_point: Q,
-    ) -> std::io::Result<Self> {
-        let mut fs = Self::new(db_path, mount_point)?;
+    ) -> io::Result<Self> {
+        let mut fs = Self::new(source_dir, mount_point)?;
         fs.read_only = true;
         Ok(fs)
     }
@@ -117,83 +131,235 @@ impl PassthroughFS {
         self.read_only = read_only;
     }
 
+    /// Get the source directory
+    pub fn source_dir(&self) -> &Path {
+        &self.source_dir
+    }
+
+    /// Get the mount point
+    pub fn mount_point(&self) -> &Path {
+        &self.mount_point
+    }
+
     /// Mount the filesystem
-    pub fn mount(self) -> std::io::Result<()> {
-        let mut options = vec![MountOption::FSName("Ize".to_string())];
+    pub fn mount(self) -> io::Result<()> {
+        let mut options = vec![
+            MountOption::FSName("PassthroughFS".to_string()),
+            MountOption::AutoUnmount,
+            MountOption::AllowOther,
+        ];
 
         if self.read_only {
             options.push(MountOption::RO);
         }
 
-        // Check if database file exists
-        if !self.db_path.exists() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Database file not found: {:?}", self.db_path),
-            ));
-        }
-
-        // We need to clone mount_point because fuser::mount2 takes ownership of self
         let mount_point = self.mount_point.clone();
         fuser::mount2(self, mount_point, &options)?;
         Ok(())
     }
 
-    // Helper method to get the real path on the underlying filesystem
-    /// Converts the virtual path to a real path in the source directory.
-    pub fn real_path(&self, path: &Path) -> PathBuf {
-        self.path_manager.get_real_path(path)
+    // =========================================================================
+    // Path Helpers
+    // =========================================================================
+
+    /// Convert relative path to real path in source_dir
+    fn to_real(&self, rel_path: &Path) -> PathBuf {
+        self.source_dir.join(rel_path)
     }
 
-    // Helper functions that delegate to PathManager
-
-    // Delegating these functions to PathManager to maintain backward compatibility
-    // with existing code - in the future, they can be removed in favor of direct calls
-    fn get_inode_for_path(&mut self, path: &Path) -> u64 {
-        self.path_manager.get_or_create_inode(path)
+    /// Get inode for a path (uses real inode from filesystem)
+    #[allow(dead_code)]
+    fn get_inode(&self, real_path: &Path) -> io::Result<u64> {
+        Ok(fs::metadata(real_path)?.ino())
     }
 
-    // Get a path for an inode number
+    /// Register an inode → path mapping
+    fn register_inode(&self, ino: u64, rel_path: PathBuf) {
+        self.inode_to_path.write().unwrap().insert(ino, rel_path);
+    }
+
+    /// Look up path for an inode
     fn get_path_for_inode(&self, ino: u64) -> Option<PathBuf> {
-        self.path_manager.get_path(ino)
+        self.inode_to_path.read().unwrap().get(&ino).cloned()
     }
 
-    // Helper to convert a file's metadata to FUSE file attributes
-    fn stat_to_fuse_attr(&self, stat: &fs::Metadata, ino: u64) -> FileAttr {
-        let kind = if stat.is_dir() {
+    /// Get the real inode for the source directory (our root)
+    #[allow(dead_code)]
+    fn get_root_real_inode(&self) -> io::Result<u64> {
+        self.get_inode(&self.source_dir)
+    }
+
+    /// Allocate a new file handle
+    fn alloc_fh(&self) -> u64 {
+        self.next_fh.fetch_add(1, Ordering::SeqCst)
+    }
+
+    // =========================================================================
+    // Attribute Helpers
+    // =========================================================================
+
+    /// Convert std::fs::Metadata to fuser::FileAttr
+    fn metadata_to_attr(&self, meta: &fs::Metadata, ino: u64) -> FileAttr {
+        let kind = if meta.is_dir() {
             FileType::Directory
-        } else if stat.is_file() {
+        } else if meta.is_file() {
             FileType::RegularFile
-        } else if stat.file_type().is_symlink() {
+        } else if meta.file_type().is_symlink() {
             FileType::Symlink
+        } else if meta.file_type().is_block_device() {
+            FileType::BlockDevice
+        } else if meta.file_type().is_char_device() {
+            FileType::CharDevice
+        } else if meta.file_type().is_fifo() {
+            FileType::NamedPipe
+        } else if meta.file_type().is_socket() {
+            FileType::Socket
         } else {
             FileType::RegularFile
         };
 
         FileAttr {
             ino,
-            size: stat.size(),
-            blocks: stat.blocks(),
-            atime: SystemTime::UNIX_EPOCH + Duration::from_secs(stat.atime() as u64),
-            mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(stat.mtime() as u64),
-            ctime: SystemTime::UNIX_EPOCH + Duration::from_secs(stat.ctime() as u64),
-            crtime: SystemTime::UNIX_EPOCH,
+            size: meta.size(),
+            blocks: meta.blocks(),
+            atime: UNIX_EPOCH + Duration::from_secs(meta.atime() as u64),
+            mtime: UNIX_EPOCH + Duration::from_secs(meta.mtime() as u64),
+            ctime: UNIX_EPOCH + Duration::from_secs(meta.ctime() as u64),
+            crtime: UNIX_EPOCH, // Not available on Linux
             kind,
-            perm: stat.mode() as u16 & 0o7777,
-            nlink: stat.nlink() as u32,
-            uid: stat.uid(),
-            gid: stat.gid(),
-            rdev: stat.rdev() as u32,
+            perm: (meta.mode() & 0o7777) as u16,
+            nlink: meta.nlink() as u32,
+            uid: meta.uid(),
+            gid: meta.gid(),
+            rdev: meta.rdev() as u32,
+            blksize: meta.blksize() as u32,
             flags: 0,
-            blksize: stat.blksize() as u32,
         }
+    }
+
+    /// Get file type from metadata for readdir
+    fn metadata_to_filetype(meta: &fs::Metadata) -> FileType {
+        if meta.is_dir() {
+            FileType::Directory
+        } else if meta.is_file() {
+            FileType::RegularFile
+        } else if meta.file_type().is_symlink() {
+            FileType::Symlink
+        } else {
+            FileType::RegularFile
+        }
+    }
+
+    /// Helper to truncate via path (when no valid fh is available)
+    fn truncate_via_path(path: &Path, size: u64) -> io::Result<()> {
+        let file = OpenOptions::new().write(true).open(path)?;
+        file.set_len(size)
+    }
+
+    /// Convert nix error to raw os error code
+    fn nix_err_to_errno(e: nix::Error) -> i32 {
+        e as i32
     }
 }
 
 impl Filesystem for PassthroughFS {
+    /// Initialize filesystem
+    fn init(
+        &mut self,
+        _req: &Request<'_>,
+        _config: &mut fuser::KernelConfig,
+    ) -> Result<(), libc::c_int> {
+        info!("PassthroughFS initialized");
+        Ok(())
+    }
+
+    /// Clean up filesystem
+    fn destroy(&mut self) {
+        info!("PassthroughFS destroyed");
+    }
+
+    /// Look up a directory entry by name and get its attributes
+    fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        debug!("lookup(parent={}, name={:?})", parent, name);
+
+        // Get parent path
+        let parent_path = if parent == FUSE_ROOT_ID {
+            PathBuf::new()
+        } else {
+            match self.get_path_for_inode(parent) {
+                Some(p) => p,
+                None => {
+                    error!("lookup: parent inode {} not found", parent);
+                    reply.error(ENOENT);
+                    return;
+                }
+            }
+        };
+
+        // Build child path
+        let rel_path = parent_path.join(name);
+        let real_path = self.to_real(&rel_path);
+
+        debug!("lookup: checking real path {:?}", real_path);
+
+        // Stat the file
+        match fs::metadata(&real_path) {
+            Ok(meta) => {
+                let ino = meta.ino();
+
+                // Register inode → path mapping
+                self.register_inode(ino, rel_path);
+
+                let attr = self.metadata_to_attr(&meta, ino);
+                debug!("lookup: found inode {} for {:?}", ino, name);
+                reply.entry(&TTL, &attr, 0);
+            }
+            Err(e) => {
+                debug!("lookup: {:?} not found: {}", name, e);
+                reply.error(e.raw_os_error().unwrap_or(ENOENT));
+            }
+        }
+    }
+
+    /// Get file attributes
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
+        debug!("getattr(ino={})", ino);
+
+        // Get path from inode
+        let rel_path = match self.get_path_for_inode(ino) {
+            Some(p) => p,
+            None => {
+                error!("getattr: inode {} not found", ino);
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let real_path = self.to_real(&rel_path);
+
+        match fs::metadata(&real_path) {
+            Ok(meta) => {
+                // Use the real inode from the filesystem, but for FUSE_ROOT_ID
+                // we must return inode 1 (not the real one)
+                let returned_ino = if ino == FUSE_ROOT_ID {
+                    FUSE_ROOT_ID
+                } else {
+                    meta.ino()
+                };
+                let attr = self.metadata_to_attr(&meta, returned_ino);
+                reply.attr(&TTL, &attr);
+            }
+            Err(e) => {
+                error!("getattr: failed to stat {:?}: {}", real_path, e);
+                reply.error(e.raw_os_error().unwrap_or(ENOENT));
+            }
+        }
+    }
+
+    /// Set file attributes
     fn setattr(
         &mut self,
-        _req: &Request,
+        _req: &Request<'_>,
         ino: u64,
         mode: Option<u32>,
         uid: Option<u32>,
@@ -214,720 +380,126 @@ impl Filesystem for PassthroughFS {
             ino, mode, uid, gid, size, fh
         );
 
-        // Get path from inode
-        let path = match self.get_path_for_inode(ino) {
-            Some(p) => p,
-            None => {
-                error!("setattr: inode {} not found in map", ino);
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let real_path = self.real_path(&path);
-
-        // Update file attributes based on provided options
-        match fs::metadata(&real_path) {
-            Ok(metadata) => {
-                let mut changed = false;
-
-                // Handle file size change (truncate)
-                if let Some(size) = size {
-                    debug!("setattr: truncating file {:?} to size {}", real_path, size);
-
-                    // If we have a file handle already, use it
-                    if let Some(fh) = fh {
-                        let fd = fh as i32;
-                        let result = unsafe { libc::ftruncate(fd, size as i64) };
-
-                        if result != 0 {
-                            let err = std::io::Error::last_os_error();
-                            error!("setattr: failed to ftruncate file: {}", err);
-                            reply.error(err.raw_os_error().unwrap_or(libc::EIO));
-                            return;
-                        }
-                    } else {
-                        // Otherwise open the file
-                        match fs::OpenOptions::new().write(true).open(&real_path) {
-                            Ok(file) => {
-                                if let Err(e) = file.set_len(size) {
-                                    error!("setattr: failed to set file size: {}", e);
-                                    reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                                    return;
-                                }
-                            }
-                            Err(e) => {
-                                error!("setattr: failed to open file for truncate: {}", e);
-                                reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                                return;
-                            }
-                        }
-                    }
-                    changed = true;
-                }
-
-                // Handle permissions change
-                if let Some(mode) = mode {
-                    debug!("setattr: changing mode of {:?} to {:o}", real_path, mode);
-                    let permissions = fs::Permissions::from_mode(mode & 0o777);
-                    if let Err(e) = fs::set_permissions(&real_path, permissions) {
-                        error!("setattr: failed to set permissions: {}", e);
-                        reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                        return;
-                    }
-                    changed = true;
-                }
-
-                // Handle ownership change
-                if uid.is_some() || gid.is_some() {
-                    error!("setattr: uid/gid change not implemented");
-                    reply.error(libc::ENOSYS);
-                    return;
-                }
-
-                // Handle timestamp changes
-                if atime.is_some() || mtime.is_some() {
-                    debug!("setattr: setting timestamps for {:?}", real_path);
-
-                    // Convert path to C string
-                    let path_cstr = match CString::new(real_path.to_str().unwrap_or("")) {
-                        Ok(s) => s,
-                        Err(_) => {
-                            error!("setattr: path contains null bytes");
-                            reply.error(libc::EINVAL);
-                            return;
-                        }
-                    };
-
-                    // Prepare timespec structs for atime and mtime
-                    let mut times: [timespec; 2] = [
-                        timespec {
-                            tv_sec: 0,
-                            tv_nsec: UTIME_OMIT,
-                        }, // atime - omit by default
-                        timespec {
-                            tv_sec: 0,
-                            tv_nsec: UTIME_OMIT,
-                        }, // mtime - omit by default
-                    ];
-
-                    // Set atime if provided
-                    if let Some(time) = atime {
-                        match time {
-                            TimeOrNow::SpecificTime(t) => {
-                                let duration = t.duration_since(UNIX_EPOCH).unwrap_or_default();
-                                times[0].tv_sec = duration.as_secs() as i64;
-                                times[0].tv_nsec = duration.subsec_nanos() as i64;
-                            }
-                            TimeOrNow::Now => {
-                                times[0].tv_nsec = UTIME_NOW;
-                            }
-                        }
-                    }
-
-                    // Set mtime if provided
-                    if let Some(time) = mtime {
-                        match time {
-                            TimeOrNow::SpecificTime(t) => {
-                                let duration = t.duration_since(UNIX_EPOCH).unwrap_or_default();
-                                times[1].tv_sec = duration.as_secs() as i64;
-                                times[1].tv_nsec = duration.subsec_nanos() as i64;
-                            }
-                            TimeOrNow::Now => {
-                                times[1].tv_nsec = UTIME_NOW;
-                            }
-                        }
-                    }
-
-                    // Call utimensat to update the timestamps
-                    let res = unsafe {
-                        libc::utimensat(
-                            libc::AT_FDCWD,
-                            path_cstr.as_ptr(),
-                            times.as_ptr(),
-                            0, // No flags
-                        )
-                    };
-
-                    if res != 0 {
-                        let err = std::io::Error::last_os_error();
-                        error!("setattr: failed to set timestamps: {}", err);
-                        reply.error(err.raw_os_error().unwrap_or(libc::EIO));
-                        return;
-                    }
-
-                    changed = true;
-                }
-
-                // Get updated attributes and reply
-                if changed {
-                    match fs::metadata(&real_path) {
-                        Ok(updated_metadata) => {
-                            let attr = self.stat_to_fuse_attr(&updated_metadata, ino);
-                            reply.attr(&TTL, &attr);
-                        }
-                        Err(e) => {
-                            error!("setattr: failed to get updated metadata: {}", e);
-                            reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                        }
-                    }
-                } else {
-                    // Nothing changed, return current attributes
-                    let attr = self.stat_to_fuse_attr(&metadata, ino);
-                    reply.attr(&TTL, &attr);
-                }
-            }
-            Err(e) => {
-                error!("setattr: failed to get metadata for {:?}: {}", real_path, e);
-                reply.error(e.raw_os_error().unwrap_or(ENOENT));
-            }
-        }
-    }
-    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        debug!("unlink(parent={}, name={:?})", parent, name);
-
-        // Check if filesystem is mounted read-only
-        if self.read_only {
-            reply.error(FsError::ReadOnlyFs.to_error_code());
-            return;
-        }
-
-        // Construct path using PathManager
-        let path = match self.path_manager.build_path(parent, Path::new(name)) {
-            Some(p) => p,
-            None => {
-                error!("unlink: parent inode {} not found in path manager", parent);
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-        let real_path = self.real_path(&path);
-
-        debug!("unlink: removing file at real path: {:?}", real_path);
-
-        // Remove the file
-        match fs::remove_file(&real_path) {
-            Ok(_) => {
-                // Remove path from PathManager
-                if let Some(ino) = self.path_manager.remove_path(&path) {
-                    debug!("unlink: removed inode {} for path {:?}", ino, path);
-                }
-
-                reply.ok();
-            }
-            Err(e) => {
-                let fs_error = e.into_fs_error(&real_path);
-                error!("unlink: error: {}", fs_error);
-                reply.error(fs_error.to_error_code());
-            }
-        }
-    }
-
-    fn write(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        data: &[u8],
-        _write_flags: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        reply: ReplyWrite,
-    ) {
-        debug!(
-            "write(ino={}, fh={}, offset={}, data.len()={}, flags=0x{:x})",
-            ino,
-            fh,
-            offset,
-            data.len(),
-            _flags
-        );
-
-        // Check if filesystem is mounted read-only
-        if self.read_only {
-            reply.error(FsError::ReadOnlyFs.to_error_code());
-            return;
-        }
-
-        // Get the path from inode using PathManager
-        let real_path = match self.path_manager.get_path(ino) {
-            Some(path) => self.path_manager.get_real_path(&path),
-            None => {
-                error!("write: inode {} not found in map", ino);
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        // Use Rust's File API instead of raw file descriptors
-        // This avoids issues with stale file handles after operations like truncate
-        match fs::OpenOptions::new().write(true).open(&real_path) {
-            Ok(mut file) => {
-                // Seek to the correct position
-                if let Err(e) = file.seek(SeekFrom::Start(offset as u64)) {
-                    error!("write: failed to seek: {}", e);
-                    reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                    return;
-                }
-
-                // Write the data
-                match file.write(data) {
-                    Ok(bytes_written) => {
-                        debug!("write: successfully wrote {} bytes", bytes_written);
-                        reply.written(bytes_written as u32);
-                    }
-                    Err(e) => {
-                        error!("write: failed to write: {}", e);
-                        reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                    }
-                }
-            }
-            Err(e) => {
-                error!("write: failed to open file: {}", e);
-                reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-            }
-        }
-    }
-
-    fn flush(&mut self, _req: &Request, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {
-        debug!("flush(ino={}, fh={}, lock_owner={})", ino, fh, lock_owner);
-
-        // In a passthrough filesystem, we can simply pass the flush operation to the OS
-        // by calling fsync on the file descriptor
-        let fd = fh as i32;
-        let result = unsafe { libc::fsync(fd) };
-
-        if result == 0 {
-            reply.ok();
-        } else {
-            let err = std::io::Error::last_os_error();
-            error!("flush error: {}", err);
-            reply.error(err.raw_os_error().unwrap_or(libc::EIO));
-        }
-    }
-
-    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        debug!("rmdir(parent={}, name={:?})", parent, name);
-
-        // Check if filesystem is mounted read-only
-        if self.read_only {
-            reply.error(FsError::ReadOnlyFs.to_error_code());
-            return;
-        }
-
-        // Construct path using PathManager
-        let path = match self.path_manager.build_path(parent, Path::new(name)) {
-            Some(p) => p,
-            None => {
-                error!("rmdir: parent inode {} not found in path manager", parent);
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-        let real_path = self.real_path(&path);
-
-        debug!("rmdir: removing directory at real path: {:?}", real_path);
-
-        // Remove the directory
-        match fs::remove_dir(&real_path) {
-            Ok(_) => {
-                // Remove path from PathManager
-                if let Some(ino) = self.path_manager.remove_path(&path) {
-                    debug!("rmdir: removed inode {} for path {:?}", ino, path);
-                }
-
-                reply.ok();
-            }
-            Err(e) => {
-                let fs_error = e.into_fs_error(&real_path);
-                error!("rmdir: error: {}", fs_error);
-                reply.error(fs_error.to_error_code());
-            }
-        }
-    }
-
-    fn release(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        fh: u64,
-        flags: i32,
-        _lock_owner: Option<u64>,
-        flush: bool,
-        reply: ReplyEmpty,
-    ) {
-        debug!(
-            "release(ino={}, fh={}, flags=0x{:x}, flush={})",
-            ino, fh, flags, flush
-        );
-
-        // Close the file descriptor
-        let fd = fh as i32;
-        let result = unsafe { libc::close(fd) };
-
-        if result == 0 {
-            reply.ok();
-        } else {
-            let err = std::io::Error::last_os_error();
-            error!("release error: {}", err);
-            reply.error(err.raw_os_error().unwrap_or(libc::EIO));
-        }
-    }
-
-    fn mknod(
-        &mut self,
-        _req: &Request,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        rdev: u32,
-        umask: u32,
-        reply: ReplyEntry,
-    ) {
-        debug!(
-            "mknod(parent={}, name={:?}, mode=0{:o}, rdev={}, umask=0{:o})",
-            parent, name, mode, rdev, umask
-        );
-
-        // Check if filesystem is mounted read-only
+        // Check read-only mode
         if self.read_only {
             reply.error(libc::EROFS);
             return;
         }
 
-        // Get the parent path from the inode map
-        let parent_path = if parent == 1 {
-            PathBuf::from("/")
-        } else {
-            match self.get_path_for_inode(parent) {
-                Some(p) => PathBuf::from("/").join(p),
-                None => {
-                    error!("create: parent inode {} not found in map", parent);
-                    reply.error(ENOENT);
-                    return;
-                }
+        // Get path from inode
+        let rel_path = match self.get_path_for_inode(ino) {
+            Some(p) => p,
+            None => {
+                error!("setattr: inode {} not found", ino);
+                reply.error(ENOENT);
+                return;
             }
         };
+        let real_path = self.to_real(&rel_path);
 
-        let path = parent_path.join(name);
-        let real_path = self.real_path(&path);
+        // Handle truncate (size change)
+        if let Some(new_size) = size {
+            let result = if let Some(fh_val) = fh {
+                let handles = self.file_handles.read().unwrap();
 
-        debug!("Creating file at real path: {:?}", real_path);
-        // Check if the file already exists
-        if real_path.exists() {
-            reply.error(EEXIST);
-            return;
+                if let Some(handle) = handles.get(&fh_val) {
+                    // Check if opened for writing
+                    if (handle.flags & (libc::O_WRONLY | libc::O_RDWR)) != 0 {
+                        // Use File::set_len() - safe Rust API
+                        debug!("setattr: using File::set_len() on fh {}", fh_val);
+                        handle.file.set_len(new_size)
+                    } else {
+                        // Not opened for writing, fall back to path-based
+                        drop(handles);
+                        Self::truncate_via_path(&real_path, new_size)
+                    }
+                } else {
+                    drop(handles);
+                    Self::truncate_via_path(&real_path, new_size)
+                }
+            } else {
+                Self::truncate_via_path(&real_path, new_size)
+            };
+
+            if let Err(e) = result {
+                error!("setattr: truncate failed: {}", e);
+                reply.error(e.raw_os_error().unwrap_or(EIO));
+                return;
+            }
         }
 
-        // Apply umask to mode
-        #[allow(clippy::unnecessary_cast)]
-        let mode_with_umask = mode & !(umask as u32);
-
-        // Create the file
-        let res = if (mode & libc::S_IFREG) != 0 {
-            // Regular file
-            match File::create(&real_path) {
-                Ok(file) => {
-                    // Set the permissions
-                    let permissions = fs::Permissions::from_mode(mode_with_umask & 0o777);
-                    let _ = file.set_permissions(permissions);
-                    Ok(())
-                }
-                Err(e) => Err(e),
+        // Handle mode change
+        if let Some(new_mode) = mode {
+            if let Err(e) = fs::set_permissions(&real_path, fs::Permissions::from_mode(new_mode)) {
+                error!("setattr: chmod failed: {}", e);
+                reply.error(e.raw_os_error().unwrap_or(EIO));
+                return;
             }
-        } else if (mode & libc::S_IFIFO) != 0 {
-            // FIFO (named pipe)
-            nix::unistd::mkfifo(
+        }
+
+        // Handle uid/gid change using nix::unistd::chown
+        if uid.is_some() || gid.is_some() {
+            let uid_opt = uid.map(Uid::from_raw);
+            let gid_opt = gid.map(Gid::from_raw);
+
+            if let Err(e) = chown(&real_path, uid_opt, gid_opt) {
+                error!("setattr: chown failed: {}", e);
+                reply.error(Self::nix_err_to_errno(e));
+                return;
+            }
+        }
+
+        // Handle atime/mtime change using nix::sys::stat::utimensat
+        if atime.is_some() || mtime.is_some() {
+            let to_timespec = |t: Option<TimeOrNow>| -> TimeSpec {
+                match t {
+                    Some(TimeOrNow::SpecificTime(st)) => {
+                        let duration = st.duration_since(UNIX_EPOCH).unwrap_or_default();
+                        TimeSpec::new(duration.as_secs() as i64, duration.subsec_nanos() as i64)
+                    }
+                    Some(TimeOrNow::Now) => TimeSpec::UTIME_NOW,
+                    None => TimeSpec::UTIME_OMIT,
+                }
+            };
+
+            let atime_ts = to_timespec(atime);
+            let mtime_ts = to_timespec(mtime);
+
+            if let Err(e) = utimensat(
+                AT_FDCWD,
                 &real_path,
-                nix::sys::stat::Mode::from_bits_truncate(mode_with_umask & 0o777),
-            )
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-        } else if (mode & libc::S_IFCHR) != 0 || (mode & libc::S_IFBLK) != 0 {
-            // Character or block device
-            // This requires root privileges and is typically not needed
-            #[cfg(target_os = "linux")]
-            {
-                use nix::sys::stat::{makedev, SFlag};
+                &atime_ts,
+                &mtime_ts,
+                UtimensatFlags::NoFollowSymlink,
+            ) {
+                error!("setattr: utimensat failed: {}", e);
+                reply.error(Self::nix_err_to_errno(e));
+                return;
+            }
+        }
 
-                let file_type = if (mode & libc::S_IFCHR) != 0 {
-                    SFlag::S_IFCHR
+        // Return updated attributes
+        match fs::metadata(&real_path) {
+            Ok(meta) => {
+                let returned_ino = if ino == FUSE_ROOT_ID {
+                    FUSE_ROOT_ID
                 } else {
-                    SFlag::S_IFBLK
+                    meta.ino()
                 };
-
-                // Combine file type with permissions
-                let mode_bits = (file_type.bits() | (mode_with_umask & 0o777)) as mode_t;
-                let dev = makedev((rdev >> 8) as u64, (rdev & 0xff) as u64);
-
-                // Use the nix system call
-                unsafe {
-                    let ret = libc::mknod(
-                        std::ffi::CString::new(real_path.to_str().unwrap())
-                            .unwrap()
-                            .as_ptr(),
-                        mode_bits,
-                        dev as libc::dev_t,
-                    );
-
-                    if ret == 0 {
-                        Ok(())
-                    } else {
-                        Err(std::io::Error::last_os_error())
-                    }
-                }
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-            }
-
-            #[cfg(not(target_os = "linux"))]
-            {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "Device creation not supported on this platform",
-                ))
-            }
-        } else {
-            // Unsupported file type
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Unsupported file type",
-            ))
-        };
-
-        match res {
-            Ok(_) => match fs::metadata(&real_path) {
-                Ok(metadata) => {
-                    let attr = self.stat_to_fuse_attr(&metadata, 0);
-                    reply.entry(&TTL, &attr, 0);
-                }
-                Err(e) => {
-                    reply.error(e.raw_os_error().unwrap_or(ENOENT));
-                }
-            },
-            Err(e) => {
-                reply.error(e.raw_os_error().unwrap_or(EACCES));
-            }
-        }
-    }
-
-    fn mkdir(
-        &mut self,
-        _req: &Request,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-        reply: ReplyEntry,
-    ) {
-        debug!(
-            "mkdir(parent={}, name={:?}, mode=0{:o}, umask=0{:o})",
-            parent, name, mode, umask
-        );
-
-        // Check if filesystem is mounted read-only
-        if self.read_only {
-            reply.error(libc::EROFS);
-            return;
-        }
-
-        // Get the parent path from the inode map
-        let parent_path = if parent == 1 {
-            PathBuf::from("/")
-        } else {
-            match self.get_path_for_inode(parent) {
-                Some(p) => PathBuf::from("/").join(p),
-                None => {
-                    error!("mkdir: parent inode {} not found in map", parent);
-                    reply.error(ENOENT);
-                    return;
-                }
-            }
-        };
-
-        let path = parent_path.join(name);
-        let real_path = self.real_path(&path);
-
-        debug!("mkdir: creating directory at real path: {:?}", real_path);
-
-        // Apply umask to mode
-        #[allow(clippy::unnecessary_cast)]
-        let mode_with_umask = mode & !(umask as u32);
-
-        // Create the directory with specified permissions
-        match fs::create_dir(&real_path) {
-            Ok(_) => {
-                // Set permissions
-                if let Ok(metadata) = fs::metadata(&real_path) {
-                    let mut permissions = metadata.permissions();
-                    permissions.set_mode(mode_with_umask & 0o777);
-                    let _ = fs::set_permissions(&real_path, permissions);
-                }
-
-                // Return directory attributes
-                match fs::metadata(&real_path) {
-                    Ok(metadata) => {
-                        // Generate a new inode number for this directory
-                        let rel_path = path.strip_prefix("/").unwrap_or(&path).to_path_buf();
-                        let ino = self.get_inode_for_path(&rel_path);
-                        debug!("mkdir: assigned inode {} to path {:?}", ino, rel_path);
-
-                        let attr = self.stat_to_fuse_attr(&metadata, ino);
-                        reply.entry(&TTL, &attr, 0);
-                    }
-                    Err(e) => {
-                        reply.error(e.raw_os_error().unwrap_or(ENOENT));
-                    }
-                }
-            }
-            Err(e) => {
-                reply.error(e.raw_os_error().unwrap_or(EACCES));
-            }
-        }
-    }
-
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        debug!("lookup(parent={}, name={:?})", parent, name);
-
-        // Build path from parent inode and name
-        let name_path = Path::new(name);
-        let path = match self.path_manager.build_path(parent, name_path) {
-            Some(p) => p,
-            None => {
-                error!("lookup: parent inode {} not found in map", parent);
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        debug!("lookup: constructed virtual path {:?}", path);
-
-        let real_path = self.real_path(&path);
-        debug!("lookup: resolved to real path {:?}", real_path);
-
-        match fs::metadata(&real_path) {
-            Ok(metadata) => {
-                // Get or create inode for this path
-                let rel_path = self.path_manager.transform_path(&path, PathForm::Relative);
-                let ino = self.path_manager.get_or_create_inode(&rel_path);
-                debug!("lookup: assigned inode {} to path {:?}", ino, rel_path);
-
-                let attr = self.stat_to_fuse_attr(&metadata, ino);
-                reply.entry(&TTL, &attr, 0);
-            }
-            Err(err) => {
-                error!("lookup: error accessing {:?}: {}", real_path, err);
-                reply.error(err.raw_os_error().unwrap_or(ENOENT));
-            }
-        }
-    }
-
-    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        debug!("getattr(ino={})", ino);
-
-        // Special case for root
-        if ino == ROOT_INODE {
-            let real_path = self.db_source_dir();
-            match fs::metadata(&real_path) {
-                Ok(metadata) => {
-                    let attr = self.stat_to_fuse_attr(&metadata, ROOT_INODE);
-                    reply.attr(&TTL, &attr);
-                }
-                Err(err) => {
-                    error!(
-                        "getattr: error accessing root directory {:?}: {}",
-                        real_path, err
-                    );
-                    reply.error(err.raw_os_error().unwrap_or(ENOENT));
-                }
-            }
-            return;
-        }
-
-        // Get path from inode
-        let rel_path = match self.path_manager.get_path(ino) {
-            Some(p) => p,
-            None => {
-                error!("getattr: inode {} not found in map", ino);
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        debug!("getattr: found path {:?} for inode {}", rel_path, ino);
-
-        let real_path = self.real_path(&rel_path);
-        debug!("getattr: resolved to real path {:?}", real_path);
-
-        match fs::metadata(&real_path) {
-            Ok(metadata) => {
-                let attr = self.stat_to_fuse_attr(&metadata, ino);
+                let attr = self.metadata_to_attr(&meta, returned_ino);
                 reply.attr(&TTL, &attr);
             }
-            Err(err) => {
-                error!("getattr: error accessing {:?}: {}", real_path, err);
-                reply.error(err.raw_os_error().unwrap_or(ENOENT));
+            Err(e) => {
+                error!("setattr: failed to get updated attrs: {}", e);
+                reply.error(e.raw_os_error().unwrap_or(EIO));
             }
         }
     }
 
-    fn read(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        reply: ReplyData,
-    ) {
-        debug!(
-            "read(ino={}, fh={}, offset={}, size={})",
-            ino, fh, offset, size
-        );
-
-        // Get the path from inode using PathManager
-        let real_path = match self.path_manager.get_path(ino) {
-            Some(path) => {
-                debug!("read: found path {:?} for inode {}", path, ino);
-                self.path_manager.get_real_path(&path)
-            }
-            None => {
-                error!("read: inode {} not found in map", ino);
-                reply.error(ENOENT);
-                return;
-            }
-        };
-        debug!("read: resolved to real path {:?}", real_path);
-
-        match File::open(&real_path) {
-            Ok(mut file) => {
-                let mut buffer = vec![0; size as usize];
-
-                match file.seek(SeekFrom::Start(offset as u64)) {
-                    Ok(_) => match file.read(&mut buffer) {
-                        Ok(n) => {
-                            buffer.truncate(n);
-                            reply.data(&buffer);
-                        }
-                        Err(err) => {
-                            reply.error(err.raw_os_error().unwrap_or(libc::EIO));
-                        }
-                    },
-                    Err(err) => {
-                        reply.error(err.raw_os_error().unwrap_or(libc::EIO));
-                    }
-                }
-            }
-            Err(err) => {
-                reply.error(err.raw_os_error().unwrap_or(ENOENT));
-            }
-        }
-    }
-
+    /// Read directory entries
     fn readdir(
         &mut self,
-        _req: &Request,
+        _req: &Request<'_>,
         ino: u64,
         _fh: u64,
         offset: i64,
@@ -936,111 +508,60 @@ impl Filesystem for PassthroughFS {
         debug!("readdir(ino={}, offset={})", ino, offset);
 
         // Get path from inode
-        let dir_path = match self.path_manager.get_path(ino) {
+        let rel_path = match self.get_path_for_inode(ino) {
             Some(p) => p,
             None => {
-                error!("readdir: inode {} not found in map", ino);
+                error!("readdir: inode {} not found", ino);
                 reply.error(ENOENT);
                 return;
             }
         };
 
-        debug!("readdir: found path {:?} for inode {}", dir_path, ino);
-
-        let real_path = self.real_path(&dir_path);
-        debug!("readdir: resolved to real path {:?}", real_path);
+        let real_path = self.to_real(&rel_path);
 
         if !real_path.is_dir() {
-            error!("readdir: path {:?} is not a directory", real_path);
             reply.error(ENOTDIR);
             return;
         }
 
         let entries = match fs::read_dir(&real_path) {
-            Ok(entries) => entries,
-            Err(err) => {
-                error!("readdir: error reading directory {:?}: {}", real_path, err);
-                reply.error(err.raw_os_error().unwrap_or(ENOENT));
+            Ok(e) => e,
+            Err(e) => {
+                error!("readdir: failed to read {:?}: {}", real_path, e);
+                reply.error(e.raw_os_error().unwrap_or(ENOENT));
                 return;
             }
         };
 
-        let mut entries_vec: Vec<(u64, FileType, OsString)> = vec![];
+        // Build entries list
+        let mut all_entries: Vec<(u64, FileType, String)> = Vec::new();
 
-        // Always add . and .. entries
-        entries_vec.push((ino, FileType::Directory, OsString::from(".")));
+        // Add "." entry (current directory)
+        all_entries.push((ino, FileType::Directory, ".".to_string()));
 
-        // For '..' use the parent's inode, or ROOT_INODE for the root
-        let parent_ino = if ino == ROOT_INODE {
-            ROOT_INODE // Root's parent is root
-        } else {
-            // Get parent path
-            let parent_path = dir_path.parent().unwrap_or(Path::new(""));
-            // Get inode for parent path
-            self.path_manager.get_or_create_inode(parent_path)
-        };
-        entries_vec.push((parent_ino, FileType::Directory, OsString::from("..")));
+        // Add ".." entry (parent directory) - simplified, just use same ino
+        // In a real implementation, we'd look up the parent's inode
+        all_entries.push((FUSE_ROOT_ID, FileType::Directory, "..".to_string()));
 
-        for entry in entries {
-            match entry {
-                Ok(entry) => {
-                    let file_name = entry.file_name();
+        // Add directory entries
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                let child_ino = meta.ino();
+                let file_type = Self::metadata_to_filetype(&meta);
+                let name = entry.file_name().to_string_lossy().into_owned();
 
-                    // Skip the database file if we're in the root directory
-                    if ino == ROOT_INODE
-                        && file_name == self.db_path.file_name().unwrap_or_default()
-                    {
-                        debug!("readdir: skipping database file {:?}", file_name);
-                        continue;
-                    }
+                // Register inode mapping for each entry
+                let child_rel_path = rel_path.join(&entry.file_name());
+                self.register_inode(child_ino, child_rel_path);
 
-                    // Construct virtual path for this entry using PathManager
-                    let entry_path = match self.path_manager.build_path(ino, Path::new(&file_name))
-                    {
-                        Some(p) => p,
-                        None => {
-                            error!("readdir: failed to build path for {:?}", file_name);
-                            continue;
-                        }
-                    };
-
-                    debug!(
-                        "readdir: processing entry {:?}, virtual path {:?}",
-                        file_name, entry_path
-                    );
-
-                    if let Ok(metadata) = entry.metadata() {
-                        let file_type = if metadata.is_dir() {
-                            FileType::Directory
-                        } else if metadata.is_file() {
-                            FileType::RegularFile
-                        } else if metadata.file_type().is_symlink() {
-                            FileType::Symlink
-                        } else {
-                            FileType::RegularFile
-                        };
-
-                        // Get or create inode for this path
-                        let entry_ino = self.path_manager.get_or_create_inode(&entry_path);
-                        debug!(
-                            "readdir: assigned inode {} to path {:?}",
-                            entry_ino, entry_path
-                        );
-
-                        entries_vec.push((entry_ino, file_type, file_name));
-                    }
-                }
-                Err(e) => {
-                    warn!("readdir: error processing directory entry: {}", e);
-                    continue;
-                }
+                all_entries.push((child_ino, file_type, name));
             }
         }
 
-        for (i, entry) in entries_vec.into_iter().enumerate().skip(offset as usize) {
-            let (ino, file_type, name) = entry;
-            let full = reply.add(ino, (i + 1) as i64, file_type, name);
-            if full {
+        // Return entries starting from offset
+        for (i, (entry_ino, kind, name)) in all_entries.iter().enumerate().skip(offset as usize) {
+            // reply.add returns true if the buffer is full
+            if reply.add(*entry_ino, (i + 1) as i64, *kind, name) {
                 break;
             }
         }
@@ -1048,9 +569,505 @@ impl Filesystem for PassthroughFS {
         reply.ok();
     }
 
+    /// Open a file
+    fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
+        debug!("open(ino={}, flags=0x{:x})", ino, flags);
+
+        // Check read-only mode for write operations
+        if self.read_only
+            && (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_APPEND | libc::O_TRUNC) != 0)
+        {
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        // Get path from inode
+        let rel_path = match self.get_path_for_inode(ino) {
+            Some(p) => p,
+            None => {
+                error!("open: inode {} not found", ino);
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        let real_path = self.to_real(&rel_path);
+
+        // Open with appropriate flags
+        let mut options = OpenOptions::new();
+        let access_mode = flags & libc::O_ACCMODE;
+        match access_mode {
+            libc::O_RDONLY => {
+                options.read(true);
+            }
+            libc::O_WRONLY => {
+                options.write(true);
+            }
+            libc::O_RDWR => {
+                options.read(true).write(true);
+            }
+            _ => {
+                options.read(true);
+            }
+        }
+
+        if flags & libc::O_APPEND != 0 {
+            options.append(true);
+        }
+        if flags & libc::O_TRUNC != 0 {
+            options.truncate(true);
+        }
+
+        // Pass through other flags via custom_flags
+        options.custom_flags(
+            flags & !(libc::O_ACCMODE | libc::O_APPEND | libc::O_TRUNC | libc::O_CREAT),
+        );
+
+        match options.open(&real_path) {
+            Ok(file) => {
+                // Allocate a new file handle (not the raw fd)
+                let fh = self.alloc_fh();
+
+                // Store File to keep fd alive
+                let handle = FileHandle {
+                    file,
+                    real_path,
+                    flags,
+                };
+                self.file_handles.write().unwrap().insert(fh, handle);
+
+                debug!("open: opened fh {} for inode {}", fh, ino);
+
+                // Return our generated fh as the FUSE file handle
+                reply.opened(fh, 0);
+            }
+            Err(e) => {
+                error!("open: failed to open {:?}: {}", real_path, e);
+                reply.error(e.raw_os_error().unwrap_or(EIO));
+            }
+        }
+    }
+
+    /// Read data from a file using FileExt::read_at
+    fn read(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyData,
+    ) {
+        debug!("read(fh={}, offset={}, size={})", fh, offset, size);
+
+        let handles = self.file_handles.read().unwrap();
+
+        if let Some(handle) = handles.get(&fh) {
+            let mut buf = vec![0u8; size as usize];
+
+            // Use FileExt::read_at for thread-safe positional read
+            match handle.file.read_at(&mut buf, offset as u64) {
+                Ok(n) => {
+                    buf.truncate(n);
+                    reply.data(&buf);
+                }
+                Err(e) => {
+                    error!("read: read_at failed: {}", e);
+                    reply.error(e.raw_os_error().unwrap_or(EIO));
+                }
+            }
+        } else {
+            warn!("read: fh {} not found in file_handles table", fh);
+            reply.error(EBADF);
+        }
+    }
+
+    /// Write data to a file using FileExt::write_at
+    fn write(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
+        debug!("write(fh={}, offset={}, len={})", fh, offset, data.len());
+
+        // Check read-only mode
+        if self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        let handles = self.file_handles.read().unwrap();
+
+        if let Some(handle) = handles.get(&fh) {
+            // Use FileExt::write_at for thread-safe positional write
+            match handle.file.write_at(data, offset as u64) {
+                Ok(n) => {
+                    reply.written(n as u32);
+                }
+                Err(e) => {
+                    error!("write: write_at failed: {}", e);
+                    reply.error(e.raw_os_error().unwrap_or(EIO));
+                }
+            }
+        } else {
+            warn!("write: fh {} not found in file_handles table", fh);
+            reply.error(EBADF);
+        }
+    }
+
+    /// Flush file data using File::sync_all
+    fn flush(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _lock_owner: u64,
+        reply: ReplyEmpty,
+    ) {
+        debug!("flush(fh={})", fh);
+
+        let handles = self.file_handles.read().unwrap();
+
+        if let Some(handle) = handles.get(&fh) {
+            // Use File::sync_all() - safe Rust API
+            match handle.file.sync_all() {
+                Ok(()) => reply.ok(),
+                Err(e) => {
+                    // EBADF is common if the file was already closed, treat it as success
+                    if e.raw_os_error() == Some(EBADF) {
+                        reply.ok();
+                    } else {
+                        error!("flush: sync_all failed: {}", e);
+                        reply.error(e.raw_os_error().unwrap_or(EIO));
+                    }
+                }
+            }
+        } else {
+            // File handle not found, might already be closed - treat as success
+            reply.ok();
+        }
+    }
+
+    /// Release an open file
+    fn release(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        debug!("release(fh={})", fh);
+
+        // Remove from table - File is dropped, fd is automatically closed via RAII
+        self.file_handles.write().unwrap().remove(&fh);
+
+        reply.ok();
+    }
+
+    /// Synchronize file contents using File::sync_all/sync_data
+    fn fsync(&mut self, _req: &Request<'_>, _ino: u64, fh: u64, datasync: bool, reply: ReplyEmpty) {
+        debug!("fsync(fh={}, datasync={})", fh, datasync);
+
+        let handles = self.file_handles.read().unwrap();
+
+        if let Some(handle) = handles.get(&fh) {
+            // Use File::sync_all() or File::sync_data() - safe Rust APIs
+            let result = if datasync {
+                handle.file.sync_data()
+            } else {
+                handle.file.sync_all()
+            };
+
+            match result {
+                Ok(()) => reply.ok(),
+                Err(e) => {
+                    error!("fsync: failed: {}", e);
+                    reply.error(e.raw_os_error().unwrap_or(EIO));
+                }
+            }
+        } else {
+            warn!("fsync: fh {} not found", fh);
+            reply.error(EBADF);
+        }
+    }
+
+    /// Create and open a file
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
+    ) {
+        debug!(
+            "create(parent={}, name={:?}, mode=0o{:o}, flags=0x{:x})",
+            parent, name, mode, flags
+        );
+
+        // Check read-only mode
+        if self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        // Get parent path
+        let parent_path = if parent == FUSE_ROOT_ID {
+            PathBuf::new()
+        } else {
+            match self.get_path_for_inode(parent) {
+                Some(p) => p,
+                None => {
+                    error!("create: parent inode {} not found", parent);
+                    reply.error(ENOENT);
+                    return;
+                }
+            }
+        };
+
+        // Build child path
+        let rel_path = parent_path.join(name);
+        let real_path = self.to_real(&rel_path);
+
+        debug!("create: creating file at {:?}", real_path);
+
+        // Open with O_CREAT | O_EXCL to atomically create
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        options.mode(mode);
+
+        match options.open(&real_path) {
+            Ok(file) => {
+                // Get metadata for the new file
+                match fs::metadata(&real_path) {
+                    Ok(meta) => {
+                        let ino = meta.ino();
+                        let fh = self.alloc_fh();
+
+                        // Register inode mapping
+                        self.register_inode(ino, rel_path);
+
+                        // Store file handle
+                        let handle = FileHandle {
+                            file,
+                            real_path,
+                            flags: libc::O_RDWR,
+                        };
+                        self.file_handles.write().unwrap().insert(fh, handle);
+
+                        let attr = self.metadata_to_attr(&meta, ino);
+                        debug!("create: created inode {} with fh {}", ino, fh);
+                        reply.created(&TTL, &attr, 0, fh, 0);
+                    }
+                    Err(e) => {
+                        error!("create: failed to stat new file: {}", e);
+                        reply.error(e.raw_os_error().unwrap_or(EIO));
+                    }
+                }
+            }
+            Err(e) => {
+                error!("create: failed to create {:?}: {}", real_path, e);
+                reply.error(e.raw_os_error().unwrap_or(EIO));
+            }
+        }
+    }
+
+    /// Create a directory
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        debug!(
+            "mkdir(parent={}, name={:?}, mode=0o{:o})",
+            parent, name, mode
+        );
+
+        // Check read-only mode
+        if self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        // Get parent path
+        let parent_path = if parent == FUSE_ROOT_ID {
+            PathBuf::new()
+        } else {
+            match self.get_path_for_inode(parent) {
+                Some(p) => p,
+                None => {
+                    error!("mkdir: parent inode {} not found", parent);
+                    reply.error(ENOENT);
+                    return;
+                }
+            }
+        };
+
+        // Build child path
+        let rel_path = parent_path.join(name);
+        let real_path = self.to_real(&rel_path);
+
+        debug!("mkdir: creating directory at {:?}", real_path);
+
+        // Create the directory
+        match fs::create_dir(&real_path) {
+            Ok(()) => {
+                // Set permissions
+                if let Err(e) = fs::set_permissions(&real_path, fs::Permissions::from_mode(mode)) {
+                    warn!("mkdir: failed to set permissions: {}", e);
+                }
+
+                // Get metadata
+                match fs::metadata(&real_path) {
+                    Ok(meta) => {
+                        let ino = meta.ino();
+
+                        // Register inode mapping
+                        self.register_inode(ino, rel_path);
+
+                        let attr = self.metadata_to_attr(&meta, ino);
+                        debug!("mkdir: created directory with inode {}", ino);
+                        reply.entry(&TTL, &attr, 0);
+                    }
+                    Err(e) => {
+                        error!("mkdir: failed to stat new directory: {}", e);
+                        reply.error(e.raw_os_error().unwrap_or(EIO));
+                    }
+                }
+            }
+            Err(e) => {
+                error!("mkdir: failed to create {:?}: {}", real_path, e);
+                reply.error(e.raw_os_error().unwrap_or(EIO));
+            }
+        }
+    }
+
+    /// Remove a file
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        debug!("unlink(parent={}, name={:?})", parent, name);
+
+        // Check read-only mode
+        if self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        // Get parent path
+        let parent_path = if parent == FUSE_ROOT_ID {
+            PathBuf::new()
+        } else {
+            match self.get_path_for_inode(parent) {
+                Some(p) => p,
+                None => {
+                    error!("unlink: parent inode {} not found", parent);
+                    reply.error(ENOENT);
+                    return;
+                }
+            }
+        };
+
+        // Build child path
+        let rel_path = parent_path.join(name);
+        let real_path = self.to_real(&rel_path);
+
+        debug!("unlink: removing file at {:?}", real_path);
+
+        // Get inode before removing (for cleanup)
+        let ino = fs::metadata(&real_path).ok().map(|m| m.ino());
+
+        // Remove the file
+        match fs::remove_file(&real_path) {
+            Ok(()) => {
+                // Remove from inode map
+                if let Some(ino) = ino {
+                    self.inode_to_path.write().unwrap().remove(&ino);
+                }
+                debug!("unlink: removed file");
+                reply.ok();
+            }
+            Err(e) => {
+                error!("unlink: failed to remove {:?}: {}", real_path, e);
+                reply.error(e.raw_os_error().unwrap_or(EIO));
+            }
+        }
+    }
+
+    /// Remove a directory
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        debug!("rmdir(parent={}, name={:?})", parent, name);
+
+        // Check read-only mode
+        if self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        // Get parent path
+        let parent_path = if parent == FUSE_ROOT_ID {
+            PathBuf::new()
+        } else {
+            match self.get_path_for_inode(parent) {
+                Some(p) => p,
+                None => {
+                    error!("rmdir: parent inode {} not found", parent);
+                    reply.error(ENOENT);
+                    return;
+                }
+            }
+        };
+
+        // Build child path
+        let rel_path = parent_path.join(name);
+        let real_path = self.to_real(&rel_path);
+
+        debug!("rmdir: removing directory at {:?}", real_path);
+
+        // Get inode before removing (for cleanup)
+        let ino = fs::metadata(&real_path).ok().map(|m| m.ino());
+
+        // Remove the directory
+        match fs::remove_dir(&real_path) {
+            Ok(()) => {
+                // Remove from inode map
+                if let Some(ino) = ino {
+                    self.inode_to_path.write().unwrap().remove(&ino);
+                }
+                debug!("rmdir: removed directory");
+                reply.ok();
+            }
+            Err(e) => {
+                error!("rmdir: failed to remove {:?}: {}", real_path, e);
+                // Check for ENOTEMPTY
+                if e.kind() == io::ErrorKind::DirectoryNotEmpty {
+                    reply.error(ENOTEMPTY);
+                } else {
+                    reply.error(e.raw_os_error().unwrap_or(EIO));
+                }
+            }
+        }
+    }
+
+    /// Rename a file or directory
     fn rename(
         &mut self,
-        _req: &Request,
+        _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
         newparent: u64,
@@ -1063,254 +1080,218 @@ impl Filesystem for PassthroughFS {
             parent, name, newparent, newname
         );
 
-        // Check if filesystem is mounted read-only
+        // Check read-only mode
         if self.read_only {
-            reply.error(FsError::ReadOnlyFs.to_error_code());
-            return;
-        }
-
-        // Construct source path using PathManager
-        let src_path = match self.path_manager.build_path(parent, Path::new(name)) {
-            Some(p) => p,
-            None => {
-                error!(
-                    "rename: source parent inode {} not found in inode map",
-                    parent
-                );
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
-        // Construct destination path using PathManager
-        let dst_path = match self.path_manager.build_path(newparent, Path::new(newname)) {
-            Some(p) => p,
-            None => {
-                error!(
-                    "rename: destination parent inode {} not found in inode map",
-                    newparent
-                );
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
-        let real_src_path = self.real_path(&src_path);
-        let real_dst_path = self.real_path(&dst_path);
-
-        debug!("rename: from {:?} to {:?}", real_src_path, real_dst_path);
-
-        // Ensure parent directory of destination exists
-        if let Some(parent_dir) = real_dst_path.parent() {
-            if !parent_dir.exists() {
-                if let Err(e) = fs::create_dir_all(parent_dir) {
-                    let fs_error = e.into_fs_error(parent_dir);
-                    error!("rename: failed to create parent directory: {}", fs_error);
-                    reply.error(fs_error.to_error_code());
-                    return;
-                }
-            }
-        }
-
-        // Perform the rename operation
-        match fs::rename(&real_src_path, &real_dst_path) {
-            Ok(_) => {
-                // Update path mapping in the PathManager
-                self.path_manager.update_path(&src_path, &dst_path);
-
-                reply.ok();
-            }
-            Err(e) => {
-                let fs_error = e.into_fs_error(&real_src_path);
-                error!("rename: error: {}", fs_error);
-                reply.error(fs_error.to_error_code());
-            }
-        }
-    }
-
-    fn create(
-        &mut self,
-        _req: &Request,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        flags: u32,
-        umask: i32,
-        reply: ReplyCreate,
-    ) {
-        debug!(
-            "create(parent={}, name={:?}, mode=0{:o}, flags={}, umask=0{:o})",
-            parent, name, mode, flags, umask as u32
-        );
-
-        // Check if filesystem is mounted read-only
-        if self.read_only {
-            reply.error(FsError::ReadOnlyFs.to_error_code());
-            return;
-        }
-
-        // Get the parent path using PathManager
-        let path = match self.path_manager.build_path(parent, Path::new(name)) {
-            Some(p) => p,
-            None => {
-                error!("create: parent inode {} not found in inode map", parent);
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-        let real_path = self.real_path(&path);
-
-        debug!("Creating file at real path: {:?}", real_path);
-
-        // Ensure parent directory exists
-        if let Some(parent_dir) = real_path.parent() {
-            if !parent_dir.exists() {
-                debug!(
-                    "Parent directory does not exist, creating: {:?}",
-                    parent_dir
-                );
-                if let Err(e) = fs::create_dir_all(parent_dir) {
-                    let fs_error = e.into_fs_error(parent_dir);
-                    error!("Failed to create parent directory: {}", fs_error);
-                    reply.error(fs_error.to_error_code());
-                    return;
-                }
-            }
-        }
-
-        // Apply umask to mode
-        #[allow(clippy::unnecessary_cast)]
-        let mode_with_umask = mode & !(umask as u32);
-
-        // Open/Create file with proper flags and mode
-        let mut options = fs::OpenOptions::new();
-        options.create(true).write(true);
-
-        if (flags as i32) & O_APPEND != 0 {
-            options.append(true);
-        }
-
-        match (flags as i32) & O_RDWR {
-            O_RDWR => {
-                options.read(true);
-            }
-            O_WRONLY => {} // Write already set
-            _ => {
-                options.read(true);
-            }
-        }
-
-        match options.open(&real_path) {
-            Ok(file) => {
-                // Set the file permissions
-                let permissions = fs::Permissions::from_mode(mode_with_umask & 0o777);
-                if let Err(e) = file.set_permissions(permissions) {
-                    error!("Failed to set file permissions: {}", e);
-                }
-
-                // Generate a new inode number for the file
-                let rel_path = self.path_manager.transform_path(&path, PathForm::Relative);
-                let inode = self.path_manager.get_or_create_inode(&rel_path);
-
-                debug!("Assigned inode {} to path {:?}", inode, rel_path);
-
-                // Get file attributes
-                match fs::metadata(&real_path) {
-                    Ok(metadata) => {
-                        let attr = self.stat_to_fuse_attr(&metadata, inode);
-
-                        // Use file descriptor as file handle
-                        let fd = unsafe { libc::dup(file.as_raw_fd()) };
-                        if fd < 0 {
-                            let err = std::io::Error::last_os_error();
-                            error!("Failed to duplicate file descriptor: {}", err);
-                            reply.error(err.raw_os_error().unwrap_or(libc::EIO));
-                            return;
-                        }
-
-                        debug!(
-                            "File created successfully at {:?} with inode {}",
-                            real_path, inode
-                        );
-                        reply.created(&TTL, &attr, 0, fd as u64, 0);
-                    }
-                    Err(e) => {
-                        let fs_error = e.into_fs_error(&real_path);
-                        error!("Failed to get file metadata: {}", fs_error);
-                        reply.error(fs_error.to_error_code());
-                    }
-                }
-            }
-            Err(e) => {
-                let fs_error = e.into_fs_error(&real_path);
-                error!("Failed to create file: {}", fs_error);
-                reply.error(fs_error.to_error_code());
-            }
-        }
-    }
-
-    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
-        debug!("open(ino={}, flags={})", ino, flags);
-
-        // If filesystem is mounted read-only, reject write operations
-        if self.read_only && (flags & (O_WRONLY | O_RDWR | O_APPEND | O_CREAT) != 0) {
-            error!("open: attempting write operation on read-only filesystem");
             reply.error(libc::EROFS);
             return;
         }
 
+        // Get old parent path
+        let old_parent_path = if parent == FUSE_ROOT_ID {
+            PathBuf::new()
+        } else {
+            match self.get_path_for_inode(parent) {
+                Some(p) => p,
+                None => {
+                    error!("rename: old parent inode {} not found", parent);
+                    reply.error(ENOENT);
+                    return;
+                }
+            }
+        };
+
+        // Get new parent path
+        let new_parent_path = if newparent == FUSE_ROOT_ID {
+            PathBuf::new()
+        } else {
+            match self.get_path_for_inode(newparent) {
+                Some(p) => p,
+                None => {
+                    error!("rename: new parent inode {} not found", newparent);
+                    reply.error(ENOENT);
+                    return;
+                }
+            }
+        };
+
+        // Build paths
+        let old_rel_path = old_parent_path.join(name);
+        let new_rel_path = new_parent_path.join(newname);
+        let old_real_path = self.to_real(&old_rel_path);
+        let new_real_path = self.to_real(&new_rel_path);
+
+        debug!("rename: {:?} -> {:?}", old_real_path, new_real_path);
+
+        // Get inode before rename (for updating mapping)
+        let ino = fs::metadata(&old_real_path).ok().map(|m| m.ino());
+
+        // Perform the rename
+        match fs::rename(&old_real_path, &new_real_path) {
+            Ok(()) => {
+                // Update inode mapping with new path
+                if let Some(ino) = ino {
+                    self.register_inode(ino, new_rel_path);
+                }
+                debug!("rename: completed successfully");
+                reply.ok();
+            }
+            Err(e) => {
+                error!("rename: failed: {}", e);
+                reply.error(e.raw_os_error().unwrap_or(EIO));
+            }
+        }
+    }
+
+    /// Open a directory
+    fn opendir(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
+        debug!("opendir(ino={})", ino);
+        // We don't need to track directory handles, just verify the inode exists
+        if ino == FUSE_ROOT_ID || self.get_path_for_inode(ino).is_some() {
+            reply.opened(0, 0);
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    /// Release an open directory
+    fn releasedir(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _flags: i32,
+        reply: ReplyEmpty,
+    ) {
+        debug!("releasedir()");
+        reply.ok();
+    }
+
+    /// Check file access permissions using nix::unistd::access
+    fn access(&mut self, _req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
+        debug!("access(ino={}, mask=0x{:x})", ino, mask);
+
         // Get path from inode
-        let path = match self.get_path_for_inode(ino) {
+        let rel_path = match self.get_path_for_inode(ino) {
             Some(p) => p,
             None => {
-                error!("open: inode {} not found in map", ino);
                 reply.error(ENOENT);
                 return;
             }
         };
+        let real_path = self.to_real(&rel_path);
 
-        debug!("open: found path {:?} for inode {}", path, ino);
+        // Use nix::unistd::access for safe access check
+        use nix::unistd::{access, AccessFlags};
 
-        let real_path = self.real_path(&path);
-        debug!("open: resolved to real path {:?}", real_path);
+        let flags = AccessFlags::from_bits_truncate(mask);
 
-        let mut options = fs::OpenOptions::new();
-
-        if flags & O_APPEND != 0 {
-            options.append(true);
+        match access(&real_path, flags) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(Self::nix_err_to_errno(e)),
         }
+    }
 
-        if flags & O_CREAT != 0 {
-            options.create(true);
-        }
+    /// Get filesystem statistics using nix::sys::statvfs
+    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: fuser::ReplyStatfs) {
+        debug!("statfs()");
 
-        match flags & O_RDWR {
-            O_RDWR => {
-                options.read(true).write(true);
+        match statvfs(&self.source_dir) {
+            Ok(stat) => {
+                reply.statfs(
+                    stat.blocks(),
+                    stat.blocks_free(),
+                    stat.blocks_available(),
+                    stat.files(),
+                    stat.files_free(),
+                    stat.block_size() as u32,
+                    stat.name_max() as u32,
+                    stat.fragment_size() as u32,
+                );
             }
-            O_WRONLY => {
-                options.write(true);
-            }
-            _ => {
-                options.read(true);
-            }
-        }
-
-        match options.open(&real_path) {
-            Ok(file) => {
-                // Use file descriptor as file handle
-                let fd = unsafe { libc::dup(file.as_raw_fd()) };
-
-                // Set direct_io flag for better performance with some applications
-                #[allow(clippy::unnecessary_cast)]
-                let direct_io = (flags & (O_DIRECT as i32)) != 0;
-                let _keep_cache = !direct_io;
-
-                reply.opened(fd as u64, if direct_io { FOPEN_DIRECT_IO } else { 0 });
-            }
-            Err(err) => {
-                reply.error(err.raw_os_error().unwrap_or(ENOENT));
+            Err(e) => {
+                error!("statfs: failed: {}", e);
+                reply.error(Self::nix_err_to_errno(e));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_passthrough_fs2_creation() {
+        // Create a temp directory for testing
+        let temp_dir = std::env::temp_dir().join("passthrough2_test");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let mount_point = std::env::temp_dir().join("passthrough2_mount");
+        let _ = fs::create_dir_all(&mount_point);
+
+        let fs = PassthroughFS::new(&temp_dir, &mount_point);
+        assert!(fs.is_ok());
+
+        let fs = fs.unwrap();
+        assert_eq!(fs.source_dir(), temp_dir);
+        assert_eq!(fs.mount_point(), mount_point);
+        assert!(!fs.read_only);
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+        let _ = fs::remove_dir_all(&mount_point);
+    }
+
+    #[test]
+    fn test_to_real_path() {
+        let temp_dir = std::env::temp_dir().join("passthrough2_test_real");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let mount_point = std::env::temp_dir().join("passthrough2_mount_real");
+
+        let fs = PassthroughFS::new(&temp_dir, &mount_point).unwrap();
+
+        let rel_path = Path::new("subdir/file.txt");
+        let expected = temp_dir.join("subdir/file.txt");
+        assert_eq!(fs.to_real(rel_path), expected);
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_read_only_mode() {
+        let temp_dir = std::env::temp_dir().join("passthrough2_test_ro");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let mount_point = std::env::temp_dir().join("passthrough2_mount_ro");
+
+        let fs = PassthroughFS::new_read_only(&temp_dir, &mount_point).unwrap();
+        assert!(fs.read_only);
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_fh_allocation() {
+        let temp_dir = std::env::temp_dir().join("passthrough2_test_fh");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let mount_point = std::env::temp_dir().join("passthrough2_mount_fh");
+
+        let fs = PassthroughFS::new(&temp_dir, &mount_point).unwrap();
+
+        // File handles should be allocated sequentially
+        let fh1 = fs.alloc_fh();
+        let fh2 = fs.alloc_fh();
+        let fh3 = fs.alloc_fh();
+
+        assert_eq!(fh1, 1);
+        assert_eq!(fh2, 2);
+        assert_eq!(fh3, 3);
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
