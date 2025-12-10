@@ -16,6 +16,7 @@ struct OperationRecorder {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct RecordedOp {
     op_type: OpType,
     path: String,
@@ -23,6 +24,7 @@ struct RecordedOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 enum OpType {
     Create,
     Write,
@@ -141,6 +143,7 @@ fn test_operation_data_requirements() {
     // This test documents what data we need to capture for each operation
 
     #[derive(Debug)]
+    #[allow(dead_code)]
     struct OperationData {
         operation: &'static str,
         required_data: Vec<&'static str>,
