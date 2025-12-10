@@ -2,6 +2,44 @@
 
 This directory contains the comprehensive test suite for Ize, built on a clean, DRY testing framework that eliminates duplicate setup code.
 
+## Running Tests
+
+**Important:** Tests must be run with single-threading due to FUSE mount operations that can interfere with each other:
+
+```bash
+# Run all tests (recommended)
+RUST_BACKTRACE=full cargo test --package ize-lib -- --test-threads=1
+
+# Run with verbose output
+RUST_BACKTRACE=full cargo test --package ize-lib -- --test-threads=1 --nocapture
+
+# Run specific test
+RUST_BACKTRACE=full cargo test --package ize-lib test_name -- --test-threads=1
+
+# Run tests matching a pattern
+RUST_BACKTRACE=full cargo test --package ize-lib passthrough2 -- --test-threads=1
+```
+
+### Why Single-Threading?
+
+The integration tests mount FUSE filesystems, which:
+1. Require exclusive access to mount points
+2. Can interfere with each other if run in parallel
+3. Need proper cleanup between test runs
+
+### Test Categories
+
+```bash
+# Unit tests only (fast, can run in parallel)
+cargo test --package ize-lib --lib
+
+# Integration tests (require single-threading)
+RUST_BACKTRACE=full cargo test --package ize-lib --test mod -- --test-threads=1
+
+# Benchmarks
+cargo bench --package ize-lib
+```
+
 ## Test Organization
 
 ```
@@ -166,27 +204,6 @@ fn test_rename_updates_path_in_operations_table() { /* ... */ }
 // Bad: Unclear
 #[test]
 fn test_rename() { /* ... */ }
-```
-
-## Running Tests
-
-```bash
-# Run all tests
-cargo test
-
-# Run specific test category
-cargo test --test unit
-cargo test --test functional
-cargo test --test integration
-
-# Run with output
-cargo test -- --nocapture
-
-# Run specific test
-cargo test test_file_operations
-
-# Run benchmarks
-cargo bench
 ```
 
 ## Adding New Test Harnesses
