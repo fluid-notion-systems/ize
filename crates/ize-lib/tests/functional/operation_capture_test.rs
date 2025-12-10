@@ -4,11 +4,9 @@
 //! without the verbosity of the previous mount tests.
 
 use std::fs;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
-use tempfile::tempdir;
 
-use ize_lib::filesystems::passthrough::PassthroughFS;
+use ize_lib::filesystems::passthrough2::PassthroughFS2;
 
 /// Simple operation recorder for testing
 #[derive(Debug, Clone)]
@@ -67,7 +65,7 @@ mod tests {
     #[test]
     fn test_operation_recording_concept() {
         // This test demonstrates the concept of recording operations
-        // In the real implementation, this would be integrated into PassthroughFS
+        // In the real implementation, this would be integrated into PassthroughFS2
 
         let recorder = OperationRecorder::new();
 
@@ -96,17 +94,16 @@ mod tests {
     }
 
     #[test]
-    fn test_passthrough_with_harness() -> std::io::Result<()> {
+    fn test_passthrough2_with_harness() -> std::io::Result<()> {
         let mut harness = FilesystemTestHarnessBuilder::new().build()?;
         harness.setup()?;
 
         harness.test_with(|ctx| {
             let source_dir = ctx.source_dir.unwrap();
-            let db_path = ctx.db_path.unwrap();
-
-            // Create a PassthroughFS instance
             let mount_dir = ctx.mount_dir.unwrap();
-            let fs = PassthroughFS::new(db_path, mount_dir).unwrap();
+
+            // Create a PassthroughFS2 instance
+            let _fs = PassthroughFS2::new(source_dir, mount_dir).unwrap();
 
             // The filesystem is created but not mounted in this test
             // This allows us to test the setup without dealing with FUSE mounting
@@ -144,7 +141,7 @@ mod tests {
         // This is more of a documentation test
         assert_eq!(operations_to_track.len(), 10);
 
-        // In the actual implementation, each of these operations in PassthroughFS
+        // In the actual implementation, each of these operations in PassthroughFS2
         // would call into our storage layer to record the operation
     }
 

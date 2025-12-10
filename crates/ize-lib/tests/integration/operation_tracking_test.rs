@@ -1,5 +1,5 @@
 use fuser::{BackgroundSession, MountOption};
-use ize_lib::filesystems::passthrough::PassthroughFS;
+use ize_lib::filesystems::passthrough2::PassthroughFS2;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -12,7 +12,6 @@ use tempfile::{tempdir, TempDir};
 struct OperationTrackingHarness {
     source_dir: TempDir,
     mount_dir: TempDir,
-    db_path: PathBuf,
     _session: Option<BackgroundSession>,
 }
 
@@ -20,19 +19,17 @@ impl OperationTrackingHarness {
     fn new() -> io::Result<Self> {
         let source_dir = tempdir()?;
         let mount_dir = tempdir()?;
-        let db_path = source_dir.path().join(".ize.db");
 
         Ok(Self {
             source_dir,
             mount_dir,
-            db_path,
             _session: None,
         })
     }
 
     fn mount(mut self) -> io::Result<Self> {
         // Create the filesystem instance
-        let fs = PassthroughFS::new(self.db_path.clone(), self.mount_dir.path())?;
+        let fs = PassthroughFS2::new(self.source_dir.path(), self.mount_dir.path())?;
 
         let mount_path = self.mount_dir.path().to_path_buf();
         let options = vec![
@@ -58,13 +55,6 @@ impl OperationTrackingHarness {
         Ok(self)
     }
 
-    /// Get the storage instance to check tracked operations
-    fn get_storage(&self) -> io::Result<()> {
-        // This would connect to the actual storage backend
-        // For now, we'll check the filesystem state
-        unimplemented!("Storage access implementation needed")
-    }
-
     /// Check if an operation was tracked by examining the filesystem state
     fn verify_operation_tracked(&self, path: &Path, operation: &str) -> bool {
         // In a real implementation, this would query the storage
@@ -82,6 +72,7 @@ impl OperationTrackingHarness {
     }
 
     /// Get list of operations recorded (simplified for testing)
+    #[allow(dead_code)]
     fn get_recorded_operations(&self) -> Vec<RecordedOperation> {
         // This would query the actual storage
         // For now, return empty vec
@@ -97,6 +88,7 @@ impl OperationTrackingHarness {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct RecordedOperation {
     operation: String,
@@ -105,6 +97,7 @@ struct RecordedOperation {
     metadata: Option<OperationMetadata>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum OperationMetadata {
     Write {

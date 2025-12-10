@@ -7,7 +7,7 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
-use ize_lib::filesystems::passthrough::PassthroughFS;
+use ize_lib::filesystems::passthrough2::PassthroughFS2;
 
 /// Simple operation recorder for testing
 #[derive(Debug, Clone)]
@@ -61,7 +61,7 @@ impl OperationRecorder {
 #[test]
 fn test_operation_recording_concept() {
     // This test demonstrates the concept of recording operations
-    // In the real implementation, this would be integrated into PassthroughFS
+    // In the real implementation, this would be integrated into PassthroughFS2
 
     let recorder = OperationRecorder::new();
 
@@ -90,17 +90,13 @@ fn test_operation_recording_concept() {
 }
 
 #[test]
-fn test_passthrough_basic_setup() -> std::io::Result<()> {
+fn test_passthrough2_basic_setup() -> std::io::Result<()> {
     // Create temporary directories
     let source_dir = tempdir()?;
     let mount_dir = tempdir()?;
-    let db_path = source_dir.path().join("test.db");
 
-    // Create dummy db file
-    fs::write(&db_path, "dummy")?;
-
-    // Create a PassthroughFS instance
-    let _fs = PassthroughFS::new(&db_path, mount_dir.path())?;
+    // Create a PassthroughFS2 instance
+    let _fs = PassthroughFS2::new(source_dir.path(), mount_dir.path())?;
 
     // The filesystem is created but not mounted in this test
     // This allows us to test the setup without dealing with FUSE mounting
@@ -136,7 +132,7 @@ fn test_operations_to_track() {
     // This is more of a documentation test
     assert_eq!(operations_to_track.len(), 10);
 
-    // In the actual implementation, each of these operations in PassthroughFS
+    // In the actual implementation, each of these operations in PassthroughFS2
     // would call into our storage layer to record the operation
 }
 

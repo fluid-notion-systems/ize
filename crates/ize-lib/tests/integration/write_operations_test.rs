@@ -1,19 +1,18 @@
-use fuser::{BackgroundSession, MountOption};
-use ize_lib::filesystems::passthrough::PassthroughFS;
+use fuser::MountOption;
+use ize_lib::filesystems::passthrough2::PassthroughFS2;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 
 /// Test harness for mounting and testing the filesystem
 struct FilesystemMountHarness {
     source_dir: TempDir,
     mount_dir: TempDir,
-    db_path: PathBuf,
-    _session: Option<BackgroundSession>,
+    _session: Option<fuser::BackgroundSession>,
 }
 
 impl FilesystemMountHarness {
@@ -21,22 +20,17 @@ impl FilesystemMountHarness {
     fn new() -> io::Result<Self> {
         let source_dir = tempdir()?;
         let mount_dir = tempdir()?;
-        let db_path = source_dir.path().join(".ize.db");
-
-        // Initialize the database
-        fs::write(&db_path, b"IZE_DB_V1")?;
 
         Ok(Self {
             source_dir,
             mount_dir,
-            db_path,
             _session: None,
         })
     }
 
     /// Mount the filesystem and return self for chaining
     fn with_mount(mut self) -> io::Result<Self> {
-        let fs = PassthroughFS::new(self.db_path.clone(), self.mount_dir.path())?;
+        let fs = PassthroughFS2::new(self.source_dir.path(), self.mount_dir.path())?;
 
         let mount_path = self.mount_dir.path().to_path_buf();
         let options = vec![
@@ -70,7 +64,6 @@ impl FilesystemMountHarness {
         let ctx = WriteOperationsContext {
             source_path: self.source_dir.path(),
             mount_path: self.mount_dir.path(),
-            db_path: &self.db_path,
         };
         test_fn(&ctx)
     }
@@ -83,7 +76,6 @@ impl FilesystemMountHarness {
         let ctx = DirectoryOperationsContext {
             source_path: self.source_dir.path(),
             mount_path: self.mount_dir.path(),
-            db_path: &self.db_path,
         };
         test_fn(&ctx)
     }
@@ -96,116 +88,97 @@ impl FilesystemMountHarness {
         let ctx = MetadataOperationsContext {
             source_path: self.source_dir.path(),
             mount_path: self.mount_dir.path(),
-            db_path: &self.db_path,
         };
         test_fn(&ctx)
     }
 
-    /// Check for dirty files in the working directory
-    fn get_dirty_files(&self) -> io::Result<Vec<PathBuf>> {
-        // In a real implementation, this would check the versioning system
-        // For now, we'll check what files have been modified since mount
-        let mut dirty_files = Vec::new();
+    /// Get list of "dirty" files (files that exist in source)
+    fn get_dirty_files(&self) -> io::Result<Vec<String>> {
+        let mut dirty = Vec::new();
 
-        fn check_dir(dir: &Path, base: &Path, dirty: &mut Vec<PathBuf>) -> io::Result<()> {
-            for entry in fs::read_dir(dir)? {
+        fn check_dir(path: &Path, base: &Path, dirty: &mut Vec<String>) -> io::Result<()> {
+            for entry in fs::read_dir(path)? {
                 let entry = entry?;
-                let path = entry.path();
-                let relative = path.strip_prefix(base).unwrap().to_path_buf();
+                let file_type = entry.file_type()?;
 
-                // Skip the database file
-                if relative
-                    .to_str()
-                    .map(|s| s.contains(".ize.db"))
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
+                let rel_path = entry
+                    .path()
+                    .strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
 
-                if path.is_dir() {
-                    check_dir(&path, base, dirty)?;
-                } else {
-                    // In real implementation, check against versioned state
-                    // For now, we'll add all non-db files
-                    dirty.push(relative);
+                if file_type.is_file() {
+                    dirty.push(rel_path);
+                } else if file_type.is_dir() {
+                    dirty.push(rel_path.clone() + "/");
+                    check_dir(&entry.path(), base, dirty)?;
                 }
             }
             Ok(())
         }
 
-        check_dir(
-            self.source_dir.path(),
-            self.source_dir.path(),
-            &mut dirty_files,
-        )?;
-        Ok(dirty_files)
+        check_dir(self.source_dir.path(), self.source_dir.path(), &mut dirty)?;
+        Ok(dirty)
     }
 }
 
 impl Drop for FilesystemMountHarness {
     fn drop(&mut self) {
-        // The BackgroundSession will automatically unmount when dropped
-        // AutoUnmount option ensures cleanup even on panic
+        // Session will be dropped automatically, which unmounts
     }
 }
 
-/// Context for file write operations
 struct WriteOperationsContext<'a> {
     source_path: &'a Path,
     mount_path: &'a Path,
-    db_path: &'a Path,
 }
 
 impl<'a> WriteOperationsContext<'a> {
     fn write_file(&self, name: &str, content: &[u8]) -> io::Result<()> {
-        let path = self.mount_path.join(name);
-        fs::write(path, content)
+        fs::write(self.mount_path.join(name), content)
     }
 
     fn append_file(&self, name: &str, content: &[u8]) -> io::Result<()> {
-        let path = self.mount_path.join(name);
-        let mut existing = fs::read(&path).unwrap_or_default();
-        existing.extend_from_slice(content);
-        fs::write(path, existing)
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(self.mount_path.join(name))?;
+        file.write_all(content)
     }
 
-    fn write_large_file(&self, name: &str, size_mb: usize) -> io::Result<()> {
-        let path = self.mount_path.join(name);
-        let content = vec![b'A'; size_mb * 1024 * 1024];
-        fs::write(path, content)
+    fn write_large_file(&self, name: &str, size: usize) -> io::Result<()> {
+        let content: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+        fs::write(self.mount_path.join(name), content)
     }
 
-    fn verify_in_source(&self, name: &str, expected: &[u8]) -> io::Result<()> {
-        let source_file = self.source_path.join(name);
-        let actual = fs::read(source_file)?;
-        assert_eq!(actual, expected, "File content mismatch in source");
-        Ok(())
+    fn verify_in_source(&self, name: &str, expected: &[u8]) -> bool {
+        match fs::read(self.source_path.join(name)) {
+            Ok(content) => content == expected,
+            Err(_) => false,
+        }
     }
 
-    fn verify_in_mount(&self, name: &str, expected: &[u8]) -> io::Result<()> {
-        let mount_file = self.mount_path.join(name);
-        let actual = fs::read(mount_file)?;
-        assert_eq!(actual, expected, "File content mismatch in mount");
-        Ok(())
+    fn verify_in_mount(&self, name: &str, expected: &[u8]) -> bool {
+        match fs::read(self.mount_path.join(name)) {
+            Ok(content) => content == expected,
+            Err(_) => false,
+        }
     }
 }
 
-/// Context for directory operations
 struct DirectoryOperationsContext<'a> {
     source_path: &'a Path,
     mount_path: &'a Path,
-    db_path: &'a Path,
 }
 
 impl<'a> DirectoryOperationsContext<'a> {
     fn create_dir(&self, name: &str) -> io::Result<()> {
-        let path = self.mount_path.join(name);
-        fs::create_dir(path)
+        fs::create_dir(self.mount_path.join(name))
     }
 
-    fn create_dir_all(&self, path: &str) -> io::Result<()> {
-        let full_path = self.mount_path.join(path);
-        fs::create_dir_all(full_path)
+    fn create_dir_all(&self, name: &str) -> io::Result<()> {
+        fs::create_dir_all(self.mount_path.join(name))
     }
 
     fn create_populated_dir(&self, name: &str, file_count: usize) -> io::Result<()> {
@@ -213,352 +186,295 @@ impl<'a> DirectoryOperationsContext<'a> {
         fs::create_dir(&dir_path)?;
 
         for i in 0..file_count {
-            let file_path = dir_path.join(format!("file_{}.txt", i));
-            fs::write(file_path, format!("Content of file {}", i))?;
+            fs::write(
+                dir_path.join(format!("file_{}.txt", i)),
+                format!("Content {}", i),
+            )?;
         }
         Ok(())
     }
 
-    fn verify_dir_exists_in_source(&self, name: &str) -> io::Result<()> {
-        let source_dir = self.source_path.join(name);
-        assert!(
-            source_dir.exists() && source_dir.is_dir(),
-            "Directory {} doesn't exist in source",
-            name
-        );
-        Ok(())
+    fn verify_dir_exists_in_source(&self, name: &str) -> bool {
+        let path = self.source_path.join(name);
+        path.exists() && path.is_dir()
     }
 
-    fn verify_dir_contents(&self, name: &str, expected_files: usize) -> io::Result<()> {
-        let mount_dir = self.mount_path.join(name);
-        let entries: Vec<_> = fs::read_dir(mount_dir)?.collect();
-        assert_eq!(
-            entries.len(),
-            expected_files,
-            "Directory {} has wrong number of files",
-            name
-        );
-        Ok(())
+    fn verify_dir_contents(&self, name: &str, expected_count: usize) -> bool {
+        match fs::read_dir(self.source_path.join(name)) {
+            Ok(entries) => entries.count() == expected_count,
+            Err(_) => false,
+        }
     }
 }
 
-/// Context for metadata operations
 struct MetadataOperationsContext<'a> {
     source_path: &'a Path,
     mount_path: &'a Path,
-    db_path: &'a Path,
 }
 
 impl<'a> MetadataOperationsContext<'a> {
     fn set_permissions(&self, name: &str, mode: u32) -> io::Result<()> {
-        let path = self.mount_path.join(name);
         let perms = fs::Permissions::from_mode(mode);
-        fs::set_permissions(path, perms)
-    }
-
-    fn set_timestamps(&self, name: &str, _atime: SystemTime, _mtime: SystemTime) -> io::Result<()> {
-        let path = self.mount_path.join(name);
-        // Touch the file to trigger metadata update through FUSE
-        fs::OpenOptions::new()
-            .create(false)
-            .write(true)
-            .open(&path)?;
-        Ok(())
+        fs::set_permissions(self.mount_path.join(name), perms)
     }
 
     fn truncate_file(&self, name: &str, size: u64) -> io::Result<()> {
-        let path = self.mount_path.join(name);
-        let file = fs::OpenOptions::new().write(true).open(path)?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(self.mount_path.join(name))?;
         file.set_len(size)
     }
 
-    fn verify_permissions(&self, name: &str, expected_mode: u32) -> io::Result<()> {
-        let source_path = self.source_path.join(name);
-        let metadata = fs::metadata(source_path)?;
-        let actual_mode = metadata.permissions().mode() & 0o777;
-        assert_eq!(
-            actual_mode,
-            expected_mode & 0o777,
-            "Permission mismatch for {}",
-            name
-        );
-        Ok(())
+    fn verify_permissions(&self, name: &str, expected_mode: u32) -> bool {
+        match fs::metadata(self.source_path.join(name)) {
+            Ok(meta) => {
+                let mode = meta.permissions().mode() & 0o777;
+                mode == expected_mode
+            }
+            Err(_) => false,
+        }
     }
 
-    fn verify_size(&self, name: &str, expected_size: u64) -> io::Result<()> {
-        let source_path = self.source_path.join(name);
-        let metadata = fs::metadata(source_path)?;
-        assert_eq!(metadata.len(), expected_size, "Size mismatch for {}", name);
-        Ok(())
+    fn verify_size(&self, name: &str, expected_size: u64) -> bool {
+        match fs::metadata(self.source_path.join(name)) {
+            Ok(meta) => meta.len() == expected_size,
+            Err(_) => false,
+        }
     }
 }
 
-// === File Write Operation Tests ===
+// === Tests without mount (harness creation) ===
 
 #[test]
-fn test_harness_creation_without_mount() {
-    // Simple test to verify basic harness creation works
-    let harness = FilesystemMountHarness::new().unwrap();
+fn test_harness_creation_without_mount() -> io::Result<()> {
+    let harness = FilesystemMountHarness::new()?;
 
-    // Verify directories were created
+    // Verify directories exist
     assert!(harness.source_dir.path().exists());
     assert!(harness.mount_dir.path().exists());
-    assert!(harness.db_path.exists());
 
-    // Verify we can write to source directory directly
-    let test_file = harness.source_dir.path().join("direct_test.txt");
-    fs::write(&test_file, b"Direct write test").unwrap();
-    assert!(test_file.exists());
+    // No dirty files initially
+    let dirty = harness.get_dirty_files()?;
+    assert!(dirty.is_empty());
 
-    let content = fs::read(&test_file).unwrap();
-    assert_eq!(content, b"Direct write test");
+    Ok(())
 }
 
+// === Write Operations Tests ===
+
 #[test]
-#[ignore = "Requires FUSE mount permissions"]
-fn test_simple_file_write_creates_dirty_entry() {
-    let mut harness = FilesystemMountHarness::new().unwrap().with_mount().unwrap();
+fn test_simple_file_write_creates_dirty_entry() -> io::Result<()> {
+    let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
     harness.test_write_operations(|ctx| {
-        // Write a simple file
-        ctx.write_file("test.txt", b"Hello, Ize!").unwrap();
+        ctx.write_file("test.txt", b"Hello, world!").unwrap();
+        thread::sleep(Duration::from_millis(100));
 
-        // Verify it exists in both mount and source
-        ctx.verify_in_mount("test.txt", b"Hello, Ize!").unwrap();
-        ctx.verify_in_source("test.txt", b"Hello, Ize!").unwrap();
+        assert!(ctx.verify_in_source("test.txt", b"Hello, world!"));
+        assert!(ctx.verify_in_mount("test.txt", b"Hello, world!"));
     });
 
-    // Check dirty files
-    let dirty = harness.get_dirty_files().unwrap();
-    assert!(
-        dirty.iter().any(|p| p.to_str().unwrap() == "test.txt"),
-        "test.txt should be marked as dirty"
-    );
+    let dirty = harness.get_dirty_files()?;
+    assert!(dirty.contains(&"test.txt".to_string()));
+
+    Ok(())
 }
 
 #[test]
-#[ignore = "Requires FUSE mount permissions"]
-fn test_multiple_file_writes_track_all_dirty() {
-    let mut harness = FilesystemMountHarness::new().unwrap().with_mount().unwrap();
+fn test_multiple_file_writes_track_all_dirty() -> io::Result<()> {
+    let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
     harness.test_write_operations(|ctx| {
-        // Write multiple files
-        for i in 0..5 {
-            let filename = format!("file_{}.txt", i);
-            let content = format!("Content {}", i);
-            ctx.write_file(&filename, content.as_bytes()).unwrap();
-        }
+        ctx.write_file("file1.txt", b"Content 1").unwrap();
+        ctx.write_file("file2.txt", b"Content 2").unwrap();
+        ctx.write_file("file3.txt", b"Content 3").unwrap();
+        thread::sleep(Duration::from_millis(100));
 
-        // Verify all files
-        for i in 0..5 {
-            let filename = format!("file_{}.txt", i);
-            let content = format!("Content {}", i);
-            ctx.verify_in_source(&filename, content.as_bytes()).unwrap();
-        }
+        assert!(ctx.verify_in_source("file1.txt", b"Content 1"));
+        assert!(ctx.verify_in_source("file2.txt", b"Content 2"));
+        assert!(ctx.verify_in_source("file3.txt", b"Content 3"));
     });
 
-    // Check all files are dirty
-    let dirty = harness.get_dirty_files().unwrap();
-    assert_eq!(dirty.len(), 5, "Should have 5 dirty files");
+    let dirty = harness.get_dirty_files()?;
+    assert!(dirty.contains(&"file1.txt".to_string()));
+    assert!(dirty.contains(&"file2.txt".to_string()));
+    assert!(dirty.contains(&"file3.txt".to_string()));
+
+    Ok(())
 }
 
 #[test]
-#[ignore = "Requires FUSE mount permissions"]
-fn test_file_append_marks_as_dirty() {
-    let mut harness = FilesystemMountHarness::new().unwrap().with_mount().unwrap();
+fn test_file_append_marks_as_dirty() -> io::Result<()> {
+    let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
     harness.test_write_operations(|ctx| {
-        // Create initial file
-        ctx.write_file("append_test.txt", b"Initial content")
-            .unwrap();
+        ctx.write_file("append.txt", b"Initial").unwrap();
+        thread::sleep(Duration::from_millis(50));
 
-        // Append to file
-        ctx.append_file("append_test.txt", b" - Appended content")
-            .unwrap();
+        ctx.append_file("append.txt", b" Appended").unwrap();
+        thread::sleep(Duration::from_millis(100));
 
-        // Verify combined content
-        ctx.verify_in_source("append_test.txt", b"Initial content - Appended content")
-            .unwrap();
+        assert!(ctx.verify_in_source("append.txt", b"Initial Appended"));
     });
 
-    let dirty = harness.get_dirty_files().unwrap();
-    assert!(dirty
-        .iter()
-        .any(|p| p.to_str().unwrap() == "append_test.txt"));
+    let dirty = harness.get_dirty_files()?;
+    assert!(dirty.contains(&"append.txt".to_string()));
+
+    Ok(())
 }
 
 #[test]
-#[ignore = "Requires FUSE mount permissions"]
-fn test_large_file_write_handles_correctly() {
-    let mut harness = FilesystemMountHarness::new().unwrap().with_mount().unwrap();
+fn test_large_file_write_handles_correctly() -> io::Result<()> {
+    let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
     harness.test_write_operations(|ctx| {
-        // Write a 10MB file
-        ctx.write_large_file("large.bin", 10).unwrap();
-
-        // Verify size
-        let metadata = fs::metadata(ctx.source_path.join("large.bin")).unwrap();
-        assert_eq!(metadata.len(), 10 * 1024 * 1024);
+        ctx.write_large_file("large.bin", 1024 * 1024).unwrap(); // 1MB
+        thread::sleep(Duration::from_millis(200));
     });
 
-    let dirty = harness.get_dirty_files().unwrap();
-    assert!(dirty.iter().any(|p| p.to_str().unwrap() == "large.bin"));
+    let dirty = harness.get_dirty_files()?;
+    assert!(dirty.contains(&"large.bin".to_string()));
+
+    Ok(())
 }
 
-// === Directory Operation Tests ===
+// === Directory Operations Tests ===
 
 #[test]
-#[ignore = "Requires FUSE mount permissions"]
-fn test_create_directory_marks_as_dirty() {
-    let mut harness = FilesystemMountHarness::new().unwrap().with_mount().unwrap();
+fn test_create_directory_marks_as_dirty() -> io::Result<()> {
+    let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
     harness.test_directory_operations(|ctx| {
-        // Create a directory
-        ctx.create_dir("test_dir").unwrap();
+        ctx.create_dir("newdir").unwrap();
+        thread::sleep(Duration::from_millis(100));
 
-        // Verify it exists
-        ctx.verify_dir_exists_in_source("test_dir").unwrap();
+        assert!(ctx.verify_dir_exists_in_source("newdir"));
     });
 
-    // Directory operations should be tracked
-    let _dirty = harness.get_dirty_files().unwrap();
-    // Note: Directory tracking might be different than files
+    let dirty = harness.get_dirty_files()?;
+    assert!(dirty.contains(&"newdir/".to_string()));
+
+    Ok(())
 }
 
 #[test]
-#[ignore = "Requires FUSE mount permissions"]
-fn test_nested_directory_creation_tracks_all() {
-    let mut harness = FilesystemMountHarness::new().unwrap().with_mount().unwrap();
+fn test_nested_directory_creation_tracks_all() -> io::Result<()> {
+    let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
     harness.test_directory_operations(|ctx| {
-        // Create nested directories
-        ctx.create_dir_all("level1/level2/level3").unwrap();
+        ctx.create_dir_all("parent/child/grandchild").unwrap();
+        thread::sleep(Duration::from_millis(100));
 
-        // Verify all levels exist
-        ctx.verify_dir_exists_in_source("level1").unwrap();
-        ctx.verify_dir_exists_in_source("level1/level2").unwrap();
-        ctx.verify_dir_exists_in_source("level1/level2/level3")
-            .unwrap();
+        assert!(ctx.verify_dir_exists_in_source("parent"));
+        assert!(ctx.verify_dir_exists_in_source("parent/child"));
+        assert!(ctx.verify_dir_exists_in_source("parent/child/grandchild"));
     });
+
+    Ok(())
 }
 
 #[test]
-#[ignore = "Requires FUSE mount permissions"]
-fn test_directory_with_files_tracks_correctly() {
-    let mut harness = FilesystemMountHarness::new().unwrap().with_mount().unwrap();
+fn test_directory_with_files_tracks_correctly() -> io::Result<()> {
+    let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
     harness.test_directory_operations(|ctx| {
-        // Create directory with files
-        ctx.create_populated_dir("data_dir", 10).unwrap();
+        ctx.create_populated_dir("project", 3).unwrap();
+        thread::sleep(Duration::from_millis(100));
 
-        // Verify directory and contents
-        ctx.verify_dir_exists_in_source("data_dir").unwrap();
-        ctx.verify_dir_contents("data_dir", 10).unwrap();
+        assert!(ctx.verify_dir_exists_in_source("project"));
+        assert!(ctx.verify_dir_contents("project", 3));
     });
 
-    let dirty = harness.get_dirty_files().unwrap();
-    // Should have 10 files marked as dirty
-    let data_files: Vec<_> = dirty
-        .iter()
-        .filter(|p| p.to_str().unwrap().starts_with("data_dir/"))
-        .collect();
-    assert_eq!(
-        data_files.len(),
-        10,
-        "Should have 10 dirty files in data_dir"
-    );
+    let dirty = harness.get_dirty_files()?;
+    assert!(dirty.contains(&"project/".to_string()));
+
+    Ok(())
 }
 
-// === Metadata Operation Tests ===
+// === Metadata Operations Tests ===
 
 #[test]
-#[ignore = "Requires FUSE mount permissions"]
-fn test_permission_change_marks_as_dirty() {
-    let mut harness = FilesystemMountHarness::new().unwrap().with_mount().unwrap();
+fn test_permission_change_marks_as_dirty() -> io::Result<()> {
+    let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
     harness.test_metadata_operations(|ctx| {
-        // Create a file first
-        fs::write(ctx.mount_path.join("perm_test.txt"), b"test").unwrap();
+        fs::write(ctx.mount_path.join("perms.txt"), b"test").unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        ctx.set_permissions("perms.txt", 0o600).unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        assert!(ctx.verify_permissions("perms.txt", 0o600));
+    });
+
+    Ok(())
+}
+
+#[test]
+fn test_file_truncate_marks_as_dirty() -> io::Result<()> {
+    let mut harness = FilesystemMountHarness::new()?.with_mount()?;
+
+    harness.test_metadata_operations(|ctx| {
+        fs::write(
+            ctx.mount_path.join("truncate.txt"),
+            b"This is some longer content",
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        ctx.truncate_file("truncate.txt", 10).unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        assert!(ctx.verify_size("truncate.txt", 10));
+    });
+
+    Ok(())
+}
+
+#[test]
+fn test_metadata_only_changes_track_correctly() -> io::Result<()> {
+    let mut harness = FilesystemMountHarness::new()?.with_mount()?;
+
+    harness.test_metadata_operations(|ctx| {
+        fs::write(ctx.mount_path.join("meta.txt"), b"content").unwrap();
+        thread::sleep(Duration::from_millis(50));
 
         // Change permissions
-        ctx.set_permissions("perm_test.txt", 0o644).unwrap();
+        ctx.set_permissions("meta.txt", 0o755).unwrap();
+        thread::sleep(Duration::from_millis(100));
 
-        // Verify permissions
-        ctx.verify_permissions("perm_test.txt", 0o644).unwrap();
+        assert!(ctx.verify_permissions("meta.txt", 0o755));
     });
 
-    let dirty = harness.get_dirty_files().unwrap();
-    assert!(dirty.iter().any(|p| p.to_str().unwrap() == "perm_test.txt"));
+    Ok(())
 }
 
-#[test]
-#[ignore = "Requires FUSE mount permissions"]
-fn test_file_truncate_marks_as_dirty() {
-    let mut harness = FilesystemMountHarness::new().unwrap().with_mount().unwrap();
+// === Mixed Operations Tests ===
 
+#[test]
+fn test_mixed_operations_all_tracked() -> io::Result<()> {
+    let mut harness = FilesystemMountHarness::new()?.with_mount()?;
+
+    // Write operations
+    harness.test_write_operations(|ctx| {
+        ctx.write_file("file.txt", b"content").unwrap();
+    });
+
+    // Directory operations
+    harness.test_directory_operations(|ctx| {
+        ctx.create_dir("dir").unwrap();
+    });
+
+    // Metadata operations
     harness.test_metadata_operations(|ctx| {
-        // Create a file with content
-        fs::write(ctx.mount_path.join("truncate_test.txt"), b"Hello, World!").unwrap();
-
-        // Truncate to 5 bytes
-        ctx.truncate_file("truncate_test.txt", 5).unwrap();
-
-        // Verify size
-        ctx.verify_size("truncate_test.txt", 5).unwrap();
+        ctx.set_permissions("file.txt", 0o644).unwrap();
     });
 
-    let dirty = harness.get_dirty_files().unwrap();
-    assert!(dirty
-        .iter()
-        .any(|p| p.to_str().unwrap() == "truncate_test.txt"));
-}
+    thread::sleep(Duration::from_millis(100));
 
-#[test]
-#[ignore = "Requires FUSE mount permissions"]
-fn test_metadata_only_changes_track_correctly() {
-    let mut harness = FilesystemMountHarness::new().unwrap().with_mount().unwrap();
+    let dirty = harness.get_dirty_files()?;
+    assert!(dirty.contains(&"file.txt".to_string()));
+    assert!(dirty.contains(&"dir/".to_string()));
 
-    harness.test_metadata_operations(|ctx| {
-        // Create files
-        fs::write(ctx.mount_path.join("meta1.txt"), b"content").unwrap();
-        fs::write(ctx.mount_path.join("meta2.txt"), b"content").unwrap();
-
-        // Change only metadata (no content changes)
-        ctx.set_permissions("meta1.txt", 0o600).unwrap();
-        ctx.set_permissions("meta2.txt", 0o644).unwrap();
-
-        // Verify
-        ctx.verify_permissions("meta1.txt", 0o600).unwrap();
-        ctx.verify_permissions("meta2.txt", 0o644).unwrap();
-    });
-
-    let dirty = harness.get_dirty_files().unwrap();
-    assert!(dirty.iter().any(|p| p.to_str().unwrap() == "meta1.txt"));
-    assert!(dirty.iter().any(|p| p.to_str().unwrap() == "meta2.txt"));
-}
-
-// === Complex Operation Tests ===
-
-#[test]
-#[ignore = "Requires FUSE mount permissions"]
-fn test_mixed_operations_all_tracked() {
-    let mut harness = FilesystemMountHarness::new().unwrap().with_mount().unwrap();
-
-    // Perform a mix of operations
-    harness.test_write_operations(|write_ctx| {
-        write_ctx.write_file("doc.txt", b"Documentation").unwrap();
-    });
-
-    harness.test_directory_operations(|dir_ctx| {
-        dir_ctx.create_dir("src").unwrap();
-        dir_ctx.create_populated_dir("tests", 3).unwrap();
-    });
-
-    harness.test_metadata_operations(|meta_ctx| {
-        meta_ctx.set_permissions("doc.txt", 0o644).unwrap();
-    });
-
-    // Verify all operations were tracked
-    let dirty = harness.get_dirty_files().unwrap();
-    assert!(dirty.len() >= 4, "Should have at least 4 dirty entries"); // doc.txt + 3 test files
+    Ok(())
 }

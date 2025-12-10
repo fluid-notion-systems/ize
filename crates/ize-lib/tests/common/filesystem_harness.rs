@@ -11,7 +11,6 @@ pub struct FilesystemTestHarness {
     resources: TestResources,
     source_dir: Option<PathBuf>,
     mount_dir: Option<PathBuf>,
-    db_path: Option<PathBuf>,
 }
 
 impl FilesystemTestHarness {
@@ -21,7 +20,6 @@ impl FilesystemTestHarness {
             resources: TestResources::new(),
             source_dir: None,
             mount_dir: None,
-            db_path: None,
         }
     }
 }
@@ -36,7 +34,6 @@ impl TestHarness for FilesystemTestHarness {
         let ctx = FilesystemTestContext {
             source_dir: self.source_dir.as_deref(),
             mount_dir: self.mount_dir.as_deref(),
-            db_path: self.db_path.as_deref(),
         };
         test_fn(ctx)
     }
@@ -54,13 +51,6 @@ impl TestHarness for FilesystemTestHarness {
             self.mount_dir = Some(dir);
         }
 
-        // Create DB file if not set
-        if self.db_path.is_none() {
-            let db_path = self.source_dir.as_ref().unwrap().join("test.db");
-            std::fs::write(&db_path, "dummy")?;
-            self.db_path = Some(db_path);
-        }
-
         Ok(())
     }
 }
@@ -70,14 +60,12 @@ impl TestHarness for FilesystemTestHarness {
 pub struct FilesystemTestContext<'a> {
     pub source_dir: Option<&'a Path>,
     pub mount_dir: Option<&'a Path>,
-    pub db_path: Option<&'a Path>,
 }
 
 /// Builder for FilesystemTestHarness
 pub struct FilesystemTestHarnessBuilder {
     source_dir: Option<PathBuf>,
     mount_dir: Option<PathBuf>,
-    db_path: Option<PathBuf>,
 }
 
 impl FilesystemTestHarnessBuilder {
@@ -85,7 +73,6 @@ impl FilesystemTestHarnessBuilder {
         Self {
             source_dir: None,
             mount_dir: None,
-            db_path: None,
         }
     }
 
@@ -98,11 +85,6 @@ impl FilesystemTestHarnessBuilder {
         self.mount_dir = Some(path.as_ref().to_path_buf());
         self
     }
-
-    pub fn db_path<P: AsRef<Path>>(mut self, path: P) -> Self {
-        self.db_path = Some(path.as_ref().to_path_buf());
-        self
-    }
 }
 
 impl TestHarnessBuilder for FilesystemTestHarnessBuilder {
@@ -113,7 +95,6 @@ impl TestHarnessBuilder for FilesystemTestHarnessBuilder {
             resources: TestResources::new(),
             source_dir: self.source_dir,
             mount_dir: self.mount_dir,
-            db_path: self.db_path,
         })
     }
 }
