@@ -2,17 +2,18 @@
 //!
 //! This implementation differs from the original PassthroughFS in several key ways:
 //! 1. Uses **real inodes** from the underlying filesystem instead of synthetic counters
-//! 2. Uses **real file descriptors** as FUSE file handles (fh IS the fd)
+//! 2. Uses **generated file handles** (not raw fds) for FUSE operations
 //! 3. Has no concept of a "database file" - just source_dir ↔ mount_point
 //! 4. Implements proper file descriptor lifecycle management via RAII
+//! 5. Uses safe Rust APIs (FileExt, nix) instead of unsafe libc calls
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -20,8 +21,13 @@ use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
-use libc::{self, EBADF, EINVAL, EIO, ENOENT, ENOTDIR, ENOTEMPTY};
+use libc::{EBADF, EIO, ENOENT, ENOTDIR, ENOTEMPTY};
 use log::{debug, error, info, warn};
+use nix::fcntl::AT_FDCWD;
+use nix::sys::stat::{utimensat, UtimensatFlags};
+use nix::sys::statvfs::statvfs;
+use nix::sys::time::TimeSpec;
+use nix::unistd::{chown, Gid, Uid};
 
 /// TTL for cached attributes (1 second)
 const TTL: Duration = Duration::from_secs(1);
@@ -32,7 +38,6 @@ const FUSE_ROOT_ID: u64 = 1;
 /// Stored file handle - keeps the File alive so fd remains valid
 struct FileHandle {
     /// The File object that owns the fd - when dropped, fd is automatically closed
-    #[allow(dead_code)]
     file: File,
     /// The real path (useful for some operations)
     #[allow(dead_code)]
@@ -45,7 +50,7 @@ struct FileHandle {
 ///
 /// Key design decisions:
 /// - Uses real inodes from the underlying filesystem
-/// - Uses real file descriptors as FUSE file handles
+/// - Uses generated file handles (not raw fds) for FUSE operations
 /// - Maintains an inode → path mapping for reverse lookups
 /// - File handles are stored to keep fds alive until release()
 pub struct PassthroughFS2 {
@@ -58,8 +63,10 @@ pub struct PassthroughFS2 {
     /// Maps real inode → relative path (for inode-based lookups)
     /// Populated during lookup() and readdir()
     inode_to_path: RwLock<HashMap<u64, PathBuf>>,
-    /// Maps fd → FileHandle (keeps File alive, fd is also the FUSE fh)
-    file_handles: RwLock<HashMap<i32, FileHandle>>,
+    /// Next file handle to assign
+    next_fh: AtomicU64,
+    /// Maps fh → FileHandle (keeps File alive)
+    file_handles: RwLock<HashMap<u64, FileHandle>>,
 }
 
 impl PassthroughFS2 {
@@ -104,6 +111,7 @@ impl PassthroughFS2 {
             mount_point,
             read_only: false,
             inode_to_path: RwLock::new(inode_to_path),
+            next_fh: AtomicU64::new(1),
             file_handles: RwLock::new(HashMap::new()),
         })
     }
@@ -181,6 +189,11 @@ impl PassthroughFS2 {
         self.get_inode(&self.source_dir)
     }
 
+    /// Allocate a new file handle
+    fn alloc_fh(&self) -> u64 {
+        self.next_fh.fetch_add(1, Ordering::SeqCst)
+    }
+
     // =========================================================================
     // Attribute Helpers
     // =========================================================================
@@ -235,6 +248,17 @@ impl PassthroughFS2 {
         } else {
             FileType::RegularFile
         }
+    }
+
+    /// Helper to truncate via path (when no valid fh is available)
+    fn truncate_via_path(path: &Path, size: u64) -> io::Result<()> {
+        let file = OpenOptions::new().write(true).open(path)?;
+        file.set_len(size)
+    }
+
+    /// Convert nix error to raw os error code
+    fn nix_err_to_errno(e: nix::Error) -> i32 {
+        e as i32
     }
 }
 
@@ -376,20 +400,14 @@ impl Filesystem for PassthroughFS2 {
         // Handle truncate (size change)
         if let Some(new_size) = size {
             let result = if let Some(fh_val) = fh {
-                let fd = fh_val as i32;
                 let handles = self.file_handles.read().unwrap();
 
-                if let Some(handle) = handles.get(&fd) {
+                if let Some(handle) = handles.get(&fh_val) {
                     // Check if opened for writing
                     if (handle.flags & (libc::O_WRONLY | libc::O_RDWR)) != 0 {
-                        // Can use ftruncate directly on the fd
-                        debug!("setattr: using ftruncate on fd {}", fd);
-                        let ret = unsafe { libc::ftruncate(fd, new_size as i64) };
-                        if ret == 0 {
-                            Ok(())
-                        } else {
-                            Err(io::Error::last_os_error())
-                        }
+                        // Use File::set_len() - safe Rust API
+                        debug!("setattr: using File::set_len() on fh {}", fh_val);
+                        handle.file.set_len(new_size)
                     } else {
                         // Not opened for writing, fall back to path-based
                         drop(handles);
@@ -419,86 +437,43 @@ impl Filesystem for PassthroughFS2 {
             }
         }
 
-        // Handle uid/gid change
+        // Handle uid/gid change using nix::unistd::chown
         if uid.is_some() || gid.is_some() {
-            let new_uid = uid
-                .map(|u| u as libc::uid_t)
-                .unwrap_or(u32::MAX as libc::uid_t);
-            let new_gid = gid
-                .map(|g| g as libc::gid_t)
-                .unwrap_or(u32::MAX as libc::gid_t);
+            let uid_opt = uid.map(Uid::from_raw);
+            let gid_opt = gid.map(Gid::from_raw);
 
-            let path_cstr = match std::ffi::CString::new(real_path.as_os_str().as_encoded_bytes()) {
-                Ok(s) => s,
-                Err(_) => {
-                    reply.error(EINVAL);
-                    return;
-                }
-            };
-
-            let ret = unsafe {
-                libc::chown(
-                    path_cstr.as_ptr(),
-                    if uid.is_some() {
-                        new_uid
-                    } else {
-                        u32::MAX as libc::uid_t
-                    },
-                    if gid.is_some() {
-                        new_gid
-                    } else {
-                        u32::MAX as libc::gid_t
-                    },
-                )
-            };
-
-            if ret != 0 {
-                let e = io::Error::last_os_error();
+            if let Err(e) = chown(&real_path, uid_opt, gid_opt) {
                 error!("setattr: chown failed: {}", e);
-                reply.error(e.raw_os_error().unwrap_or(EIO));
+                reply.error(Self::nix_err_to_errno(e));
                 return;
             }
         }
 
-        // Handle atime/mtime change
+        // Handle atime/mtime change using nix::sys::stat::utimensat
         if atime.is_some() || mtime.is_some() {
-            let path_cstr = match std::ffi::CString::new(real_path.as_os_str().as_encoded_bytes()) {
-                Ok(s) => s,
-                Err(_) => {
-                    reply.error(EINVAL);
-                    return;
-                }
-            };
-
-            let to_timespec = |t: Option<TimeOrNow>| -> libc::timespec {
+            let to_timespec = |t: Option<TimeOrNow>| -> TimeSpec {
                 match t {
                     Some(TimeOrNow::SpecificTime(st)) => {
                         let duration = st.duration_since(UNIX_EPOCH).unwrap_or_default();
-                        libc::timespec {
-                            tv_sec: duration.as_secs() as i64,
-                            tv_nsec: duration.subsec_nanos() as i64,
-                        }
+                        TimeSpec::new(duration.as_secs() as i64, duration.subsec_nanos() as i64)
                     }
-                    Some(TimeOrNow::Now) => libc::timespec {
-                        tv_sec: 0,
-                        tv_nsec: libc::UTIME_NOW,
-                    },
-                    None => libc::timespec {
-                        tv_sec: 0,
-                        tv_nsec: libc::UTIME_OMIT,
-                    },
+                    Some(TimeOrNow::Now) => TimeSpec::UTIME_NOW,
+                    None => TimeSpec::UTIME_OMIT,
                 }
             };
 
-            let times = [to_timespec(atime), to_timespec(mtime)];
+            let atime_ts = to_timespec(atime);
+            let mtime_ts = to_timespec(mtime);
 
-            let ret =
-                unsafe { libc::utimensat(libc::AT_FDCWD, path_cstr.as_ptr(), times.as_ptr(), 0) };
-
-            if ret != 0 {
-                let e = io::Error::last_os_error();
+            if let Err(e) = utimensat(
+                AT_FDCWD,
+                &real_path,
+                &atime_ts,
+                &mtime_ts,
+                UtimensatFlags::NoFollowSymlink,
+            ) {
                 error!("setattr: utimensat failed: {}", e);
-                reply.error(e.raw_os_error().unwrap_or(EIO));
+                reply.error(Self::nix_err_to_errno(e));
                 return;
             }
         }
@@ -649,8 +624,8 @@ impl Filesystem for PassthroughFS2 {
 
         match options.open(&real_path) {
             Ok(file) => {
-                // Get the real fd - this IS our file handle
-                let fd = file.as_raw_fd();
+                // Allocate a new file handle (not the raw fd)
+                let fh = self.alloc_fh();
 
                 // Store File to keep fd alive
                 let handle = FileHandle {
@@ -658,12 +633,12 @@ impl Filesystem for PassthroughFS2 {
                     real_path,
                     flags,
                 };
-                self.file_handles.write().unwrap().insert(fd, handle);
+                self.file_handles.write().unwrap().insert(fh, handle);
 
-                debug!("open: opened fd {} for inode {}", fd, ino);
+                debug!("open: opened fh {} for inode {}", fh, ino);
 
-                // Return fd as the FUSE file handle
-                reply.opened(fd as u64, 0);
+                // Return our generated fh as the FUSE file handle
+                reply.opened(fh, 0);
             }
             Err(e) => {
                 error!("open: failed to open {:?}: {}", real_path, e);
@@ -672,7 +647,7 @@ impl Filesystem for PassthroughFS2 {
         }
     }
 
-    /// Read data from a file
+    /// Read data from a file using FileExt::read_at
     fn read(
         &mut self,
         _req: &Request<'_>,
@@ -686,37 +661,29 @@ impl Filesystem for PassthroughFS2 {
     ) {
         debug!("read(fh={}, offset={}, size={})", fh, offset, size);
 
-        // fh IS the fd
-        let fd = fh as i32;
+        let handles = self.file_handles.read().unwrap();
 
-        // Optional safety check - verify we have this handle
-        if !self.file_handles.read().unwrap().contains_key(&fd) {
-            warn!("read: fd {} not in file_handles table", fd);
-            // Still try to read - the fd might still be valid
-        }
+        if let Some(handle) = handles.get(&fh) {
+            let mut buf = vec![0u8; size as usize];
 
-        // Use pread for thread-safe positional read
-        let mut buf = vec![0u8; size as usize];
-        let n = unsafe {
-            libc::pread(
-                fd,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                size as usize,
-                offset,
-            )
-        };
-
-        if n >= 0 {
-            buf.truncate(n as usize);
-            reply.data(&buf);
+            // Use FileExt::read_at for thread-safe positional read
+            match handle.file.read_at(&mut buf, offset as u64) {
+                Ok(n) => {
+                    buf.truncate(n);
+                    reply.data(&buf);
+                }
+                Err(e) => {
+                    error!("read: read_at failed: {}", e);
+                    reply.error(e.raw_os_error().unwrap_or(EIO));
+                }
+            }
         } else {
-            let e = io::Error::last_os_error();
-            error!("read: pread failed: {}", e);
-            reply.error(e.raw_os_error().unwrap_or(EIO));
+            warn!("read: fh {} not found in file_handles table", fh);
+            reply.error(EBADF);
         }
     }
 
-    /// Write data to a file
+    /// Write data to a file using FileExt::write_at
     fn write(
         &mut self,
         _req: &Request<'_>,
@@ -737,28 +704,26 @@ impl Filesystem for PassthroughFS2 {
             return;
         }
 
-        // fh IS the fd
-        let fd = fh as i32;
+        let handles = self.file_handles.read().unwrap();
 
-        // Optional safety check
-        if !self.file_handles.read().unwrap().contains_key(&fd) {
-            warn!("write: fd {} not in file_handles table", fd);
-        }
-
-        // Use pwrite for thread-safe positional write
-        let n =
-            unsafe { libc::pwrite(fd, data.as_ptr() as *const libc::c_void, data.len(), offset) };
-
-        if n >= 0 {
-            reply.written(n as u32);
+        if let Some(handle) = handles.get(&fh) {
+            // Use FileExt::write_at for thread-safe positional write
+            match handle.file.write_at(data, offset as u64) {
+                Ok(n) => {
+                    reply.written(n as u32);
+                }
+                Err(e) => {
+                    error!("write: write_at failed: {}", e);
+                    reply.error(e.raw_os_error().unwrap_or(EIO));
+                }
+            }
         } else {
-            let e = io::Error::last_os_error();
-            error!("write: pwrite failed: {}", e);
-            reply.error(e.raw_os_error().unwrap_or(EIO));
+            warn!("write: fh {} not found in file_handles table", fh);
+            reply.error(EBADF);
         }
     }
 
-    /// Flush file data
+    /// Flush file data using File::sync_all
     fn flush(
         &mut self,
         _req: &Request<'_>,
@@ -769,20 +734,25 @@ impl Filesystem for PassthroughFS2 {
     ) {
         debug!("flush(fh={})", fh);
 
-        let fd = fh as i32;
+        let handles = self.file_handles.read().unwrap();
 
-        // fsync the fd
-        if unsafe { libc::fsync(fd) } == 0 {
-            reply.ok();
-        } else {
-            let e = io::Error::last_os_error();
-            // EBADF is common if the file was already closed, treat it as success
-            if e.raw_os_error() == Some(EBADF) {
-                reply.ok();
-            } else {
-                error!("flush: fsync failed: {}", e);
-                reply.error(e.raw_os_error().unwrap_or(EIO));
+        if let Some(handle) = handles.get(&fh) {
+            // Use File::sync_all() - safe Rust API
+            match handle.file.sync_all() {
+                Ok(()) => reply.ok(),
+                Err(e) => {
+                    // EBADF is common if the file was already closed, treat it as success
+                    if e.raw_os_error() == Some(EBADF) {
+                        reply.ok();
+                    } else {
+                        error!("flush: sync_all failed: {}", e);
+                        reply.error(e.raw_os_error().unwrap_or(EIO));
+                    }
+                }
             }
+        } else {
+            // File handle not found, might already be closed - treat as success
+            reply.ok();
         }
     }
 
@@ -799,32 +769,36 @@ impl Filesystem for PassthroughFS2 {
     ) {
         debug!("release(fh={})", fh);
 
-        let fd = fh as i32;
-
         // Remove from table - File is dropped, fd is automatically closed via RAII
-        self.file_handles.write().unwrap().remove(&fd);
+        self.file_handles.write().unwrap().remove(&fh);
 
         reply.ok();
     }
 
-    /// Synchronize file contents
+    /// Synchronize file contents using File::sync_all/sync_data
     fn fsync(&mut self, _req: &Request<'_>, _ino: u64, fh: u64, datasync: bool, reply: ReplyEmpty) {
         debug!("fsync(fh={}, datasync={})", fh, datasync);
 
-        let fd = fh as i32;
+        let handles = self.file_handles.read().unwrap();
 
-        let ret = if datasync {
-            unsafe { libc::fdatasync(fd) }
-        } else {
-            unsafe { libc::fsync(fd) }
-        };
+        if let Some(handle) = handles.get(&fh) {
+            // Use File::sync_all() or File::sync_data() - safe Rust APIs
+            let result = if datasync {
+                handle.file.sync_data()
+            } else {
+                handle.file.sync_all()
+            };
 
-        if ret == 0 {
-            reply.ok();
+            match result {
+                Ok(()) => reply.ok(),
+                Err(e) => {
+                    error!("fsync: failed: {}", e);
+                    reply.error(e.raw_os_error().unwrap_or(EIO));
+                }
+            }
         } else {
-            let e = io::Error::last_os_error();
-            error!("fsync: failed: {}", e);
-            reply.error(e.raw_os_error().unwrap_or(EIO));
+            warn!("fsync: fh {} not found", fh);
+            reply.error(EBADF);
         }
     }
 
@@ -881,7 +855,7 @@ impl Filesystem for PassthroughFS2 {
                 match fs::metadata(&real_path) {
                     Ok(meta) => {
                         let ino = meta.ino();
-                        let fd = file.as_raw_fd();
+                        let fh = self.alloc_fh();
 
                         // Register inode mapping
                         self.register_inode(ino, rel_path);
@@ -892,11 +866,11 @@ impl Filesystem for PassthroughFS2 {
                             real_path,
                             flags: libc::O_RDWR,
                         };
-                        self.file_handles.write().unwrap().insert(fd, handle);
+                        self.file_handles.write().unwrap().insert(fh, handle);
 
                         let attr = self.metadata_to_attr(&meta, ino);
-                        debug!("create: created inode {} with fd {}", ino, fd);
-                        reply.created(&TTL, &attr, 0, fd as u64, 0);
+                        debug!("create: created inode {} with fh {}", ino, fh);
+                        reply.created(&TTL, &attr, 0, fh, 0);
                     }
                     Err(e) => {
                         error!("create: failed to stat new file: {}", e);
@@ -1192,7 +1166,7 @@ impl Filesystem for PassthroughFS2 {
         reply.ok();
     }
 
-    /// Check file access permissions
+    /// Check file access permissions using nix::unistd::access
     fn access(&mut self, _req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
         debug!("access(ino={}, mask=0x{:x})", ino, mask);
 
@@ -1206,64 +1180,39 @@ impl Filesystem for PassthroughFS2 {
         };
         let real_path = self.to_real(&rel_path);
 
-        let path_cstr = match std::ffi::CString::new(real_path.as_os_str().as_encoded_bytes()) {
-            Ok(s) => s,
-            Err(_) => {
-                reply.error(EINVAL);
-                return;
-            }
-        };
+        // Use nix::unistd::access for safe access check
+        use nix::unistd::{access, AccessFlags};
 
-        let ret = unsafe { libc::access(path_cstr.as_ptr(), mask) };
+        let flags = AccessFlags::from_bits_truncate(mask);
 
-        if ret == 0 {
-            reply.ok();
-        } else {
-            let e = io::Error::last_os_error();
-            reply.error(e.raw_os_error().unwrap_or(EIO));
+        match access(&real_path, flags) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(Self::nix_err_to_errno(e)),
         }
     }
 
-    /// Get filesystem statistics
+    /// Get filesystem statistics using nix::sys::statvfs
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: fuser::ReplyStatfs) {
         debug!("statfs()");
 
-        let path_cstr = match std::ffi::CString::new(self.source_dir.as_os_str().as_encoded_bytes())
-        {
-            Ok(s) => s,
-            Err(_) => {
-                reply.error(EINVAL);
-                return;
+        match statvfs(&self.source_dir) {
+            Ok(stat) => {
+                reply.statfs(
+                    stat.blocks(),
+                    stat.blocks_free(),
+                    stat.blocks_available(),
+                    stat.files(),
+                    stat.files_free(),
+                    stat.block_size() as u32,
+                    stat.name_max() as u32,
+                    stat.fragment_size() as u32,
+                );
             }
-        };
-
-        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        let ret = unsafe { libc::statvfs(path_cstr.as_ptr(), &mut stat) };
-
-        if ret == 0 {
-            reply.statfs(
-                stat.f_blocks,
-                stat.f_bfree,
-                stat.f_bavail,
-                stat.f_files,
-                stat.f_ffree,
-                stat.f_bsize as u32,
-                stat.f_namemax as u32,
-                stat.f_frsize as u32,
-            );
-        } else {
-            let e = io::Error::last_os_error();
-            error!("statfs: failed: {}", e);
-            reply.error(e.raw_os_error().unwrap_or(EIO));
+            Err(e) => {
+                error!("statfs: failed: {}", e);
+                reply.error(Self::nix_err_to_errno(e));
+            }
         }
-    }
-}
-
-impl PassthroughFS2 {
-    /// Helper to truncate via path (when no valid fh is available)
-    fn truncate_via_path(path: &Path, size: u64) -> io::Result<()> {
-        let file = OpenOptions::new().write(true).open(path)?;
-        file.set_len(size)
     }
 }
 
@@ -1319,6 +1268,28 @@ mod tests {
 
         let fs = PassthroughFS2::new_read_only(&temp_dir, &mount_point).unwrap();
         assert!(fs.read_only);
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_fh_allocation() {
+        let temp_dir = std::env::temp_dir().join("passthrough2_test_fh");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let mount_point = std::env::temp_dir().join("passthrough2_mount_fh");
+
+        let fs = PassthroughFS2::new(&temp_dir, &mount_point).unwrap();
+
+        // File handles should be allocated sequentially
+        let fh1 = fs.alloc_fh();
+        let fh2 = fs.alloc_fh();
+        let fh3 = fs.alloc_fh();
+
+        assert_eq!(fh1, 1);
+        assert_eq!(fh2, 2);
+        assert_eq!(fh3, 3);
 
         // Clean up
         let _ = fs::remove_dir_all(&temp_dir);
