@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/ize", "crates/ize-lib"]
+exclude = ["vendor/pijul"]
 resolver = "2"
 
 [workspace.package]

@@ -3,3 +3,8 @@
 
 # [source.vendored-sources]
 # directory = "vendor"
+
+[target.'cfg(all())']
+# Suppress all lint warnings from dependencies (including vendored ones)
+# This only affects dependencies, not your own code
+rustflags = ["--cap-lints", "allow"]
