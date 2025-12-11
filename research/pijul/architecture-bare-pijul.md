@@ -1,16 +1,6 @@
 # Ize Architecture: Bare Pijul
 
-Ize transparently versions file operations into a bare Pijul repository. The existing `PassthroughFS` passes through to `working/` for immediate file access, while `OpQueue` processes changes directly against the bare `.pijul/` database via libpijul.
-
-## Configuration
-
-```
-~/.config/ize/config.toml
-```
-
-```toml
-central-dir = "~/.local/share/ize"
-```
+Ize transparently versions file operations into a bare Pijul repository. The `ObservingFS<PassthroughFS>` handles immediate file I/O to `working/`, while `OpcodeRecorder` captures operations and the processor applies them to the bare `.pijul/` database via libpijul.
 
 ## Directory Structure
 
@@ -19,352 +9,415 @@ central-dir = "~/.local/share/ize"
 ├── config.toml
 └── projects/
     └── {project-uuid}/
-        ├── .pijul/              # Pijul repository (source of truth)
+        ├── .pijul/              # Bare Pijul repository (source of truth)
         │   ├── pristine/        # Sanakirja database - file content graph
         │   ├── changes/         # Patch storage
         │   └── config
-        ├── working/             # User-visible state (latest committed)
+        ├── working/             # User-visible state (current filesystem)
         └── meta/
             └── project.toml
 ```
 
-## Core Concept
+## Core Architecture
 
 **Two parallel paths:**
 
-1. **PassthroughFS → working/** - Immediate file I/O for user
-2. **OpQueue → bare .pijul/** - Async versioning via libpijul
+1. **ObservingFS → PassthroughFS → working/** - Immediate file I/O for user
+2. **OpcodeRecorder → OpcodeQueue → Processor → bare .pijul/** - Async versioning via libpijul
 
 ```
-User Write                                     
-    │                                          
-    ▼                                          
-┌─────────────────┐                            
-│      FUSE       │                            
-│  PassthroughFS  │                            
-└────────┬────────┘                            
-         │                                     
-         ├──────────────────┐                  
-         │                  │                  
-         ▼                  ▼                  
-   ┌──────────┐      ┌────────────┐            
-   │ working/ │      │  Enqueue   │            
-   │  (write) │      │ Op + data  │            
-   └──────────┘      └─────┬──────┘            
-                           │                   
-                           ▼                   
-                     ┌────────────┐     ┌──────────┐
-                     │  Process:  │     │  bare    │
-                     │  libpijul  │────►│ .pijul/  │
-                     │  (no FS)   │     │ pristine │
-                     └────────────┘     └──────────┘
+User Write
+    │
+    ▼
+┌─────────────────────────────────────┐
+│     ObservingFS<PassthroughFS>      │
+│                                     │
+│  ┌─────────────┐  ┌──────────────┐  │
+│  │ FsObserver  │  │ PassthroughFS│  │
+│  │ notifications│  │  (working/)  │  │
+│  └──────┬──────┘  └──────┬───────┘  │
+└─────────┼────────────────┼──────────┘
+          │                │
+          ▼                ▼
+   ┌──────────────┐   ┌──────────┐
+   │OpcodeRecorder│   │ working/ │
+   │              │   │  (write) │
+   └──────┬───────┘   └──────────┘
+          │
+          ▼
+   ┌──────────────┐
+   │ OpcodeQueue  │
+   │ (VecDeque)   │
+   └──────┬───────┘
+          │
+          ▼
+   ┌──────────────┐     ┌──────────┐
+   │  Processor:  │     │  bare    │
+   │  libpijul    │────►│ .pijul/  │
+   │  (Memory WC) │     │ pristine │
+   └──────────────┘     └──────────┘
 ```
 
-**Key insight:** OpQueue never touches `working/`. It operates entirely against the bare `.pijul/` directory using libpijul APIs. The `working/` directory is solely managed by PassthroughFS.
+**Key insight:** The processor never touches `working/`. It operates entirely against the bare `.pijul/` directory using libpijul's in-memory working copy. The `working/` directory is solely managed by PassthroughFS.
 
-## Operation Queue
+## Current Implementation
 
-Each op is **self-contained** with full data payload.
+### Opcode Types (implemented)
 
 ```rust
-pub enum OpType {
-    Create { data: Vec<u8>, mode: u32 },
-    Write { offset: i64, data: Vec<u8> },
-    Unlink,
-    Rename { from: String, to: String },
-    Truncate { size: u64 },
-    SetAttr { 
-        mode: Option<u32>, 
-        uid: Option<u32>,
-        gid: Option<u32>,
-        size: Option<u64>,
-        atime: Option<u64>,
-        mtime: Option<u64>,
-    },
-    MkDir { mode: u32 },
-    RmDir,
+pub struct Opcode {
+    seq: u64,           // Monotonic sequence number
+    timestamp: u64,     // Nanoseconds since Unix epoch
+    op: Operation,      // The operation
 }
 
-pub struct Op {
-    id: u64,
-    op_type: OpType,
-    path: String,
-    timestamp: u64,
+pub enum Operation {
+    // File operations
+    FileCreate { path: PathBuf, mode: u32, content: Vec<u8> },
+    FileWrite { path: PathBuf, offset: u64, data: Vec<u8> },
+    FileTruncate { path: PathBuf, new_size: u64 },
+    FileDelete { path: PathBuf },
+    FileRename { old_path: PathBuf, new_path: PathBuf },
+
+    // Directory operations
+    DirCreate { path: PathBuf, mode: u32 },
+    DirDelete { path: PathBuf },
+    DirRename { old_path: PathBuf, new_path: PathBuf },
+
+    // Metadata operations
+    SetPermissions { path: PathBuf, mode: u32 },
+    SetTimestamps { path: PathBuf, atime: Option<u64>, mtime: Option<u64> },
+    SetOwnership { path: PathBuf, uid: Option<u32>, gid: Option<u32> },
+
+    // Link operations
+    SymlinkCreate { path: PathBuf, target: PathBuf },
+    SymlinkDelete { path: PathBuf },
+    HardLinkCreate { existing_path: PathBuf, new_path: PathBuf },
 }
 ```
 
-**Why data in op?** By the time we process op N, the user may have enqueued ops N+1, N+2... We cannot read from working/ as it would reflect later state.
-
-## Pijul Direct Integration
-
-### Reading File Content from Pristine
+### OpcodeQueue (implemented)
 
 ```rust
-use libpijul::{MutTxnTExt, TxnTExt, pristine::*, output::*};
+pub struct OpcodeQueue {
+    inner: Mutex<QueueInner>,   // VecDeque storage
+    not_empty: Condvar,          // Wake-on-push notification
+}
+
+// Key methods:
+queue.try_push(opcode)  // Non-blocking, returns Err if at capacity
+queue.push(opcode)      // Always succeeds (allows overflow)
+queue.pop()             // Blocking - waits for item
+queue.try_pop()         // Non-blocking
+queue.drain()           // Get all pending opcodes
+```
+
+### OpcodeRecorder (implemented)
+
+```rust
+pub struct OpcodeRecorder {
+    inode_map: InodeMap,       // Shared with PassthroughFS
+    source_dir: PathBuf,       // For metadata lookups
+    next_seq: AtomicU64,       // Sequence generator
+    sender: OpcodeSender,      // Queue handle
+}
+
+impl FsObserver for OpcodeRecorder {
+    fn on_write(&self, ino: u64, fh: u64, offset: i64, data: &[u8]) { ... }
+    fn on_create(&self, parent: u64, name: &OsStr, mode: u32, ...) { ... }
+    fn on_unlink(&self, parent: u64, name: &OsStr) { ... }
+    fn on_mkdir(&self, parent: u64, name: &OsStr, mode: u32, ...) { ... }
+    fn on_rmdir(&self, parent: u64, name: &OsStr) { ... }
+    fn on_rename(&self, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr) { ... }
+    fn on_setattr(&self, ino: u64, size: Option<u64>, mode: Option<u32>, ...) { ... }
+    fn on_symlink(&self, parent: u64, name: &OsStr, target: &Path) { ... }
+    fn on_link(&self, ino: u64, newparent: u64, newname: &OsStr) { ... }
+}
+```
+
+## Pijul Integration (next phase)
+
+### The Challenge
+
+By the time the processor handles opcode N, the user may have already performed operations N+1, N+2, etc. We **cannot** read from `working/` as it would reflect a later state.
+
+### Solution: Virtual Working Copy Per-Operation
+
+Use libpijul's `Memory` type to create an in-memory working copy representing the state at the time of the operation:
+
+```
+Opcode Processing Flow:
+
+  Opcode { path: "foo.txt", op: FileWrite { offset: 0, data: "new" } }
+                     │
+                     ▼
+  ┌─────────────────────────────────────────┐
+  │ 1. Get current content from pristine    │
+  │    at channel HEAD                      │
+  │    (output_file → Vec<u8>)              │
+  └──────────────────┬──────────────────────┘
+                     │
+                     ▼
+  ┌─────────────────────────────────────────┐
+  │ 2. Apply op to get "new" content        │
+  │    old_content[offset..] = data         │
+  └──────────────────┬──────────────────────┘
+                     │
+                     ▼
+  ┌─────────────────────────────────────────┐
+  │ 3. Create Memory working copy with      │
+  │    the "new" content                    │
+  └──────────────────┬──────────────────────┘
+                     │
+                     ▼
+  ┌─────────────────────────────────────────┐
+  │ 4. Record change (diff pristine vs      │
+  │    Memory working copy)                 │
+  └──────────────────┬──────────────────────┘
+                     │
+                     ▼
+  ┌─────────────────────────────────────────┐
+  │ 5. Apply change to pristine             │
+  └─────────────────────────────────────────┘
+```
+
+### libpijul Key Types
+
+| Type | Purpose |
+|------|---------|
+| `Pristine` | Sanakirja database handle |
+| `ArcTxn<T>` | Thread-safe transaction wrapper |
+| `ChannelRef<T>` | Reference to a branch/channel |
+| `Memory` | In-memory working copy |
+| `ChangeStore` | Trait for storing changes |
+| `RecordBuilder` | Builder for recording changes |
+| `Hash` | Change identifier |
+
+### libpijul Key Operations
+
+| Operation | Function |
+|-----------|----------|
+| Begin transaction | `pristine.arc_txn_begin()` |
+| Load channel | `txn.read().load_channel(name)` |
+| Track file | `txn.write().add_file(path, mode)` |
+| Record change | `builder.record(...)` + `builder.finish()` |
+| Save change | `changes.save_change(&mut change, ...)` |
+| Apply locally | `apply_local_change(...)` |
+| Output file | `output::output_file(...)` |
+| Commit transaction | `txn.commit()` |
+
+### PijulBackend Sketch
+
+```rust
+use libpijul::working_copy::memory::Memory;
+use libpijul::pristine::sanakirja::Pristine;
+use libpijul::changestore::filesystem::FileSystem as ChangeStore;
+
+pub struct PijulBackend {
+    pristine: Pristine,
+    changes: ChangeStore,
+    channel_name: String,
+}
 
 impl PijulBackend {
-    /// Get file contents at HEAD (or specific change)
-    fn get_file_content(&self, path: &str) -> Result<Vec<u8>> {
-        let txn = self.repo.pristine.txn_begin()?;
-        let channel = txn.load_channel(&self.channel_name)?
-            .ok_or(Error::NoChannel)?;
-        
-        // Get the inode for this path
-        let inode = txn.find_inode(path)?;
-        
-        // Output file content to memory buffer
+    /// Apply an opcode and create a change
+    pub fn apply_opcode(&self, opcode: &Opcode) -> Result<Option<Hash>, Error> {
+        let txn = self.pristine.arc_txn_begin()?;
+        let channel = {
+            let t = txn.read();
+            t.load_channel(&self.channel_name)?.unwrap()
+        };
+
+        match opcode.op() {
+            Operation::FileWrite { path, offset, data } => {
+                // 1. Get current file content from pristine
+                let current_content = self.get_file_content(&txn, &channel, path)?;
+
+                // 2. Apply the write operation in memory
+                let mut new_content = current_content;
+                let offset = *offset as usize;
+                let end = offset + data.len();
+                if end > new_content.len() {
+                    new_content.resize(end, 0);
+                }
+                new_content[offset..end].copy_from_slice(data);
+
+                // 3. Create in-memory working copy with new content
+                let memory_wc = Memory::new();
+                memory_wc.add_file(path.to_str().unwrap(), new_content);
+
+                // 4. Record the change
+                let mut builder = libpijul::RecordBuilder::new();
+                builder.record(
+                    txn.clone(),
+                    libpijul::Algorithm::default(),
+                    false,
+                    &libpijul::DEFAULT_SEPARATOR,
+                    channel.clone(),
+                    &memory_wc,
+                    &self.changes,
+                    path.to_str().unwrap(),
+                    1,
+                )?;
+
+                let rec = builder.finish();
+                if rec.actions.is_empty() {
+                    return Ok(None); // No changes
+                }
+
+                // 5. Create and save the change
+                let changes = rec.actions
+                    .into_iter()
+                    .map(|r| r.globalize(&*txn.read()).unwrap())
+                    .collect();
+
+                let mut change = libpijul::change::Change::make_change(
+                    &*txn.read(),
+                    &channel,
+                    changes,
+                    std::mem::take(&mut *rec.contents.lock()),
+                    libpijul::change::ChangeHeader {
+                        message: format!("write to {}", path.display()),
+                        authors: vec![],
+                        description: None,
+                        timestamp: jiff::Timestamp::from_nanosecond(opcode.timestamp() as i128)?,
+                    },
+                    Vec::new(),
+                )?;
+
+                let hash = self.changes.save_change(&mut change, |_, _| Ok::<_, Error>(()))?;
+
+                // 6. Apply to local pristine
+                libpijul::apply::apply_local_change(
+                    &mut *txn.write(),
+                    &channel,
+                    &change,
+                    &hash,
+                    &rec.updatables,
+                )?;
+
+                txn.commit()?;
+                Ok(Some(hash))
+            }
+
+            Operation::FileCreate { path, mode, content } => {
+                let memory_wc = Memory::new();
+                memory_wc.add_file(path.to_str().unwrap(), content.clone());
+                // ... record and apply similar to FileWrite
+            }
+
+            Operation::FileDelete { path } => {
+                // Record deletion via Memory working copy without the file
+                // ...
+            }
+
+            // ... other operation types
+        }
+    }
+
+    /// Get file content from pristine at HEAD
+    fn get_file_content(
+        &self,
+        txn: &ArcTxn<impl libpijul::MutTxnT>,
+        channel: &ChannelRef<impl libpijul::MutTxnT>,
+        path: &PathBuf,
+    ) -> Result<Vec<u8>, Error> {
+        let t = txn.read();
+        let c = channel.read();
+
+        let (pos, _) = t.follow_oldest_path(&self.changes, &*c, path.to_str().unwrap())?;
+
         let mut buffer = Vec::new();
-        output_file(&txn, &channel, &mut buffer, &inode)?;
-        
+        libpijul::output::output_file(
+            &self.changes,
+            txn,
+            channel,
+            pos,
+            &mut libpijul::vertex_buffer::Writer::new(&mut buffer),
+        )?;
+
         Ok(buffer)
     }
 }
 ```
 
-### Creating Changes Programmatically
+### Opcode Processor
 
 ```rust
-impl PijulBackend {
-    /// Apply an operation and create a change
-    fn apply_op(&mut self, op: &Op) -> Result<Hash> {
-        let mut txn = self.repo.pristine.mut_txn_begin()?;
-        let channel = txn.load_channel(&self.channel_name)?
-            .ok_or(Error::NoChannel)?;
-        
-        match &op.op_type {
-            OpType::Write { offset, data } => {
-                // 1. Get current content from pristine
-                let mut content = self.get_file_content(&op.path)?;
-                
-                // 2. Apply write in memory
-                let offset = *offset as usize;
-                let end = offset + data.len();
-                if end > content.len() {
-                    content.resize(end, 0);
-                }
-                content[offset..end].copy_from_slice(data);
-                
-                // 3. Create change representing this modification
-                let change = self.create_file_change(&txn, &channel, &op.path, &content)?;
-                
-                // 4. Apply change to pristine
-                let hash = self.repo.changes.save_change(&change)?;
-                txn.apply_change(&channel, &hash)?;
-                
-                txn.commit()?;
-                Ok(hash)
-            }
-            OpType::Create { data, mode } => {
-                // Create new file change
-                let change = self.create_new_file_change(&txn, &op.path, data, *mode)?;
-                let hash = self.repo.changes.save_change(&change)?;
-                txn.apply_change(&channel, &hash)?;
-                txn.commit()?;
-                Ok(hash)
-            }
-            // ... other op types
-        }
-    }
-}
-```
-
-**Note:** No sync back to working/ needed. PassthroughFS already wrote there. OpQueue just records the change in Pijul history.
-
-## FUSE Layer (PassthroughFS)
-
-The existing `PassthroughFS` (in `crates/ize-lib/src/filesystems/passthrough.rs`) handles all file I/O. It uses `PathManager` for inode↔path mapping and passes operations through to the underlying `working/` directory.
-
-### Current PassthroughFS Structure
-
-```rust
-pub struct PassthroughFS {
-    db_path: PathBuf,          // Legacy: was for SQLite, repurpose for .pijul/
-    mount_point: PathBuf,      // Where FUSE mounts
-    read_only: bool,
-    path_manager: PathManager, // Handles inode ↔ path mapping
-}
-```
-
-### Integration: VersionedFS Wrapper
-
-Wrap `PassthroughFS` to add OpQueue integration:
-
-```rust
-pub struct VersionedFS {
-    passthrough: PassthroughFS,
-    pijul_dir: PathBuf,        // Bare .pijul/ directory
-    op_queue: OpQueue,
-}
-
-impl VersionedFS {
-    pub fn new(working_dir: PathBuf, pijul_dir: PathBuf, mount_point: PathBuf) -> Result<Self> {
-        // PassthroughFS uses db_path's parent as source dir
-        // So we pass working_dir with a dummy file to set source correctly
-        let dummy_db = working_dir.join(".ize-marker");
-        let passthrough = PassthroughFS::new(&dummy_db, &mount_point)?;
-        
-        Ok(Self {
-            passthrough,
-            pijul_dir,
-            op_queue: OpQueue::new(),
-        })
-    }
-}
-
-impl Filesystem for VersionedFS {
-    fn write(&mut self, req: &Request, ino: u64, fh: u64,
-             offset: i64, data: &[u8], write_flags: u32, 
-             flags: i32, lock_owner: Option<u64>, reply: ReplyWrite) {
-        
-        // Get path before passthrough (need it for op)
-        let path = self.passthrough.path_manager.get_path(ino)
-            .map(|p| p.to_string_lossy().to_string());
-        
-        // 1. Enqueue op with full data FIRST
-        if let Some(path_str) = path {
-            let op = Op {
-                id: self.op_queue.next_id(),
-                op_type: OpType::Write {
-                    offset,
-                    data: data.to_vec(),
-                },
-                path: path_str,
-                timestamp: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-            };
-            self.op_queue.push(op);
-        }
-        
-        // 2. Delegate to PassthroughFS for actual write
-        self.passthrough.write(req, ino, fh, offset, data, 
-                               write_flags, flags, lock_owner, reply);
-    }
-    
-    fn create(&mut self, req: &Request, parent: u64, name: &OsStr,
-              mode: u32, flags: u32, umask: i32, reply: ReplyCreate) {
-        // For create, we need to capture data after the file is created
-        // Option: read back the file, or track via write ops
-        // For now, create with empty data, writes will follow
-        
-        let path = self.passthrough.path_manager.build_path(parent, Path::new(name))
-            .map(|p| p.to_string_lossy().to_string());
-        
-        if let Some(path_str) = path {
-            let op = Op {
-                id: self.op_queue.next_id(),
-                op_type: OpType::Create {
-                    data: Vec::new(),  // Content comes via subsequent writes
-                    mode,
-                },
-                path: path_str,
-                timestamp: now(),
-            };
-            self.op_queue.push(op);
-        }
-        
-        self.passthrough.create(req, parent, name, mode, flags, umask, reply);
-    }
-    
-    // Delegate read-only operations directly
-    fn read(&mut self, req: &Request, ino: u64, fh: u64,
-            offset: i64, size: u32, flags: i32, 
-            lock_owner: Option<u64>, reply: ReplyData) {
-        self.passthrough.read(req, ino, fh, offset, size, flags, lock_owner, reply);
-    }
-    
-    // ... other operations follow same pattern:
-    // 1. Build op with full data
-    // 2. Enqueue
-    // 3. Delegate to passthrough
-}
-```
-
-### Operations That Need OpQueue Integration
-
-| FUSE Op | OpType | Data Captured |
-|---------|--------|---------------|
-| `write` | `Write` | offset + data bytes |
-| `create` | `Create` | mode (data via writes) |
-| `unlink` | `Unlink` | path only |
-| `rmdir` | `RmDir` | path only |
-| `mkdir` | `MkDir` | mode |
-| `rename` | `Rename` | from + to paths |
-| `setattr` | `SetAttr` | changed attributes |
-
-### Read-Only Operations (No OpQueue)
-
-These delegate directly to `PassthroughFS`:
-- `lookup`, `getattr`, `read`, `readdir`, `open`, `flush`, `release`
-
-## Op Processing
-
-Background thread processes queue against bare `.pijul/`:
-
-```rust
-pub struct OpProcessor {
+pub struct OpcodeProcessor {
     pijul: PijulBackend,
-    queue: Arc<OpQueue>,
+    queue: Arc<OpcodeQueue>,
 }
 
-impl OpProcessor {
-    pub fn new(pijul_dir: PathBuf, queue: Arc<OpQueue>) -> Result<Self> {
-        Ok(Self {
-            pijul: PijulBackend::open(pijul_dir)?,
-            queue,
-        })
-    }
-    
+impl OpcodeProcessor {
     pub fn run(&mut self) {
         loop {
-            if let Some(op) = self.queue.pop() {
-                match self.pijul.apply_op(&op) {
-                    Ok(hash) => {
-                        // No filesystem sync - working/ already has the data
-                        log::info!("Recorded op {}: {} -> {}", op.id, op.path, hash);
-                    }
-                    Err(e) => {
-                        log::error!("Failed to record op {}: {}", op.id, e);
-                        // TODO: retry logic or dead-letter queue
-                    }
+            let opcode = self.queue.pop(); // Blocks until available
+
+            match self.pijul.apply_opcode(&opcode) {
+                Ok(Some(hash)) => {
+                    log::info!("Recorded opcode #{}: {} -> {}",
+                        opcode.seq(), opcode.path().display(), hash);
                 }
-            } else {
-                thread::sleep(Duration::from_millis(10));
+                Ok(None) => {
+                    log::debug!("Opcode #{} resulted in no change", opcode.seq());
+                }
+                Err(e) => {
+                    log::error!("Failed to process opcode #{}: {}", opcode.seq(), e);
+                    // TODO: retry logic or dead-letter queue
+                }
             }
         }
     }
-    
-    /// Spawn processor in background thread
-    pub fn spawn(pijul_dir: PathBuf, queue: Arc<OpQueue>) -> JoinHandle<()> {
+
+    pub fn spawn(pijul_dir: PathBuf, queue: Arc<OpcodeQueue>) -> JoinHandle<()> {
         thread::spawn(move || {
-            let mut processor = OpProcessor::new(pijul_dir, queue)
-                .expect("Failed to create OpProcessor");
+            let mut processor = OpcodeProcessor::new(pijul_dir, queue)
+                .expect("Failed to create OpcodeProcessor");
             processor.run();
         })
     }
 }
 ```
 
-**Key point:** `OpProcessor` never touches `working/`. It only updates the bare `.pijul/` pristine database. The `PassthroughFS` already wrote the actual file data.
-
 ## Consistency Model
 
 | Location | Contents | Updated By |
 |----------|----------|------------|
-| working/ | Current file state | PassthroughFS (immediate) |
-| .pijul/pristine | Versioned history | OpQueue (async) |
-| OpQueue | Pending ops + data | FUSE write ops |
+| `working/` | Current file state | PassthroughFS (immediate) |
+| `.pijul/pristine` | Versioned history | OpcodeProcessor (async) |
+| `OpcodeQueue` | Pending ops + data | OpcodeRecorder |
 
-**Read path**: PassthroughFS → working/ (always current)
+**Read path**: PassthroughFS → `working/` (always current)
 
-**Write path**: 
-1. PassthroughFS writes to working/ (immediate)
-2. Enqueue op with data copy
+**Write path**:
+1. PassthroughFS writes to `working/` (immediate)
+2. OpcodeRecorder captures operation with data copy
 3. Return to user (non-blocking)
-4. Background: OpQueue applies to bare .pijul/
+4. Background: OpcodeProcessor applies to bare `.pijul/`
 
-**Consistency**: `working/` is always ahead of or equal to `.pijul/` history. The OpQueue eventually catches up. No sync-back needed since PassthroughFS already wrote the data.
+**Consistency**: `working/` is always ahead of or equal to `.pijul/` history. The OpcodeProcessor eventually catches up. No sync-back needed since PassthroughFS already wrote the data.
+
+## Performance Considerations
+
+### Reading from Pristine
+
+`output_file()` reconstructs a file by traversing the graph. For small-to-medium files, this is fast. For very large files with many changes, it may become slower.
+
+**Mitigation:** Cache recently-read file contents keyed by (path, channel_state).
+
+### Recording Changes
+
+The `record` operation diffs the working copy against the pristine. With an in-memory working copy containing only the changed file(s), this should be fast.
+
+**Optimization:** Use `prefix` parameter to scope recording to just the affected file.
+
+### Coalescing Operations
+
+Multiple rapid writes to the same file could be coalesced:
+- Buffer ops for the same file within a time window
+- Apply all buffered ops to get final content
+- Record single change
 
 ## CLI
 
@@ -378,24 +431,11 @@ ize restore <name> <path> <hash>   # Restore file from change
 ize status <name>                  # Show pending ops
 ```
 
-## libpijul Key APIs
-
-| API | Purpose |
-|-----|---------|
-| `txn_begin()` | Start read transaction |
-| `mut_txn_begin()` | Start write transaction |
-| `load_channel()` | Get branch/channel reference |
-| `find_inode()` | Path → internal inode |
-| `output_file()` | Render file content from graph |
-| `apply_change()` | Apply a change to channel |
-| `changes.save_change()` | Persist change to disk |
-
 ## Future Considerations
 
 - **Op persistence**: Write queue to disk for crash recovery
 - **Batching**: Coalesce rapid writes before commit
 - **In-memory pristine**: For tests / embedded use
 - **Multiple channels**: Branch support via separate channels
-- **Content hashing**: Dedup identical data in OpQueue
-- **PathManager refactor**: Currently tied to `db_path` parent; could simplify for `working/` dir
+- **Content hashing**: Dedup identical data in OpcodeQueue
 - **Restore operation**: Use `output_file()` to reconstruct file from pristine, write to `working/`
