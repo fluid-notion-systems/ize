@@ -7,7 +7,7 @@ pub mod pijul;
 pub mod project;
 pub mod storage;
 
-pub use pijul::{PijulBackend, PijulError};
+pub use pijul::{OpcodeError, OpcodeRecordingBackend, PijulBackend, PijulError};
 pub use project::{IzeProject, ProjectError, ProjectInfo, ProjectManager};
 
 pub fn version() -> &'static str {

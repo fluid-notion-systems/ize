@@ -6,6 +6,12 @@
 //!
 //! Note: This is the first backend implementation. The architecture is
 //! designed to support pluggable backends in the future via a VcsBackend trait.
+//!
+//! ## Modules
+//!
+//! - [`operations`]: Opcode recording - converts filesystem operations into Pijul changes
+
+pub mod operations;
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +19,9 @@ use libpijul::pristine::sanakirja::{MutTxn, Pristine, SanakirjaError, Txn};
 use libpijul::working_copy::filesystem::FileSystem as WorkingCopy;
 use libpijul::{ChannelTxnT, MutTxnT, TxnT};
 use thiserror::Error;
+
+// Re-export key types from operations module
+pub use operations::{OpcodeError, OpcodeRecordingBackend};
 
 /// Constants matching pijul-repository
 pub const PRISTINE_DIR: &str = "pristine";
