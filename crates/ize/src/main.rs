@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use env_logger::Env;
-use ize_lib::cli::commands::{Cli, Commands};
+use ize_lib::cli::commands::{ChannelAction, Cli, Commands};
 use ize_lib::filesystems::passthrough::PassthroughFS;
-use ize_lib::storage::StorageManager;
+use ize_lib::{IzeProject, ProjectManager};
 use log::{error, info};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() -> Result<()> {
@@ -21,89 +22,24 @@ fn main() -> Result<()> {
     let unmount_on_exit = cli.unmount_on_exit;
 
     match cli.command {
-        Commands::Init { directory } => {
-            info!("Initializing directory {:?} for version control", directory);
-
-            // Check if directory exists
-            if !directory.exists() {
-                error!("Directory does not exist: {:?}", directory);
-                return Err(anyhow::anyhow!("Directory does not exist"));
-            }
-
-            // Check if directory is actually a directory
-            if !directory.is_dir() {
-                error!("Path is not a directory: {:?}", directory);
-                return Err(anyhow::anyhow!("Path is not a directory"));
-            }
-
-            // Initialize the database
-            StorageManager::init(&directory)
-                .with_context(|| format!("Failed to initialize storage in {:?}", directory))?;
-
-            println!("Successfully initialized directory for version control");
-            println!("You can now mount the filesystem with:");
-            println!("Ize mount {:?} <mountpoint>", directory);
+        Commands::Init { directory, channel } => {
+            cmd_init(&directory, channel.as_deref())?;
         }
         Commands::Mount {
-            source_dir,
-            mountpoint,
+            directory,
             read_only,
+            foreground,
         } => {
-            info!(
-                "Mounting filesystem from {:?} to mount point {:?}{}",
-                source_dir,
-                mountpoint,
-                if read_only { " (read-only)" } else { "" }
-            );
-
-            // Check if the directory was initialized
-            if !StorageManager::is_valid(&source_dir).with_context(|| {
-                format!(
-                    "Failed to check if {:?} is a valid Ize directory",
-                    source_dir
-                )
-            })? {
-                error!(
-                    "Directory {:?} has not been initialized for version control",
-                    source_dir
-                );
-                error!("Run 'Ize init {:?}' first", source_dir);
-                return Err(anyhow::anyhow!("Directory not initialized"));
-            }
-
-            // Construct DB path from source directory
-            let db_path = source_dir.join("Ize.db");
-
-            // Save mountpoint for cleanup on exit
-            let mp_copy = mountpoint.clone();
-
-            // Create and mount the passthrough filesystem
-            let fs = if read_only {
-                PassthroughFS::new_read_only(db_path, mp_copy.clone())?
-            } else {
-                PassthroughFS::new(db_path, mp_copy.clone())?
-            };
-
-            if unmount_on_exit {
-                info!("Will unmount filesystem on exit");
-
-                // Set up signal handler for SIGINT and SIGTERM
-                ctrlc::set_handler(move || {
-                    info!("Received interrupt signal, unmounting filesystem");
-                    // Use fusermount to unmount the filesystem
-                    match Command::new("fusermount").arg("-u").arg(&mp_copy).status() {
-                        Ok(status) if status.success() => {
-                            info!("Successfully unmounted filesystem")
-                        }
-                        Ok(status) => error!("Failed to unmount filesystem, exit code: {}", status),
-                        Err(e) => error!("Failed to execute unmount command: {}", e),
-                    }
-                    std::process::exit(0);
-                })
-                .expect("Error setting signal handler");
-            }
-
-            fs.mount()?;
+            cmd_mount(&directory, read_only, foreground, unmount_on_exit)?;
+        }
+        Commands::Unmount { directory } => {
+            cmd_unmount(&directory)?;
+        }
+        Commands::Status { directory, verbose } => {
+            cmd_status(directory.as_deref(), verbose)?;
+        }
+        Commands::List { format } => {
+            cmd_list(&format)?;
         }
         Commands::History {
             file_path,
@@ -111,8 +47,6 @@ fn main() -> Result<()> {
             verbose,
         } => {
             info!("Viewing history for file {:?}", file_path);
-
-            // TODO: Implement history viewing logic
             println!("File history viewing not yet implemented");
 
             if verbose {
@@ -129,18 +63,436 @@ fn main() -> Result<()> {
             force,
         } => {
             info!("Restoring file {:?} to version {}", file_path, version);
-
-            // TODO: Implement restoration logic
             println!("File restoration not yet implemented");
 
             if force {
                 println!("Force mode enabled, skipping confirmation");
             }
         }
+        Commands::Channel { action } => {
+            cmd_channel(action)?;
+        }
+        Commands::Remove { directory, force } => {
+            cmd_remove(&directory, force)?;
+        }
     }
 
-    // Check for any pending background operations (will be implemented later)
-    // For now, this ensures we don't exit immediately after certain operations
+    Ok(())
+}
+
+/// Initialize a directory for version control
+fn cmd_init(directory: &PathBuf, channel: Option<&str>) -> Result<()> {
+    info!("Initializing directory {:?} for version control", directory);
+
+    // Check if directory exists
+    if !directory.exists() {
+        error!("Directory does not exist: {:?}", directory);
+        return Err(anyhow::anyhow!("Directory does not exist: {:?}", directory));
+    }
+
+    // Check if directory is actually a directory
+    if !directory.is_dir() {
+        error!("Path is not a directory: {:?}", directory);
+        return Err(anyhow::anyhow!("Path is not a directory: {:?}", directory));
+    }
+
+    let manager = ProjectManager::new().with_context(|| "Failed to create project manager")?;
+
+    // Check if already tracked
+    let canonical = std::fs::canonicalize(directory)?;
+    if manager.find_by_source_dir(&canonical)?.is_some() {
+        return Err(anyhow::anyhow!(
+            "Directory is already tracked: {:?}\nUse 'ize status {:?}' to view project info",
+            canonical,
+            directory
+        ));
+    }
+
+    let project = manager
+        .create_project(directory)
+        .with_context(|| format!("Failed to initialize project for {:?}", directory))?;
+
+    // If a custom channel was requested, switch to it
+    if let Some(channel_name) = channel {
+        if channel_name != "main" {
+            // Create and switch to the custom channel
+            project
+                .pijul
+                .create_channel(channel_name)
+                .with_context(|| format!("Failed to create channel '{}'", channel_name))?;
+        }
+    }
+
+    println!("✓ Initialized ize for '{}'", canonical.display());
+    println!("  Project UUID: {}", project.uuid());
+    println!("  Channel: {}", project.current_channel());
+    println!();
+    println!("Next steps:");
+    println!("  Mount with: ize mount {}", directory.display());
+    println!("  View status: ize status {}", directory.display());
 
     Ok(())
+}
+
+/// Mount a tracked directory
+fn cmd_mount(
+    directory: &PathBuf,
+    read_only: bool,
+    foreground: bool,
+    unmount_on_exit: bool,
+) -> Result<()> {
+    info!(
+        "Mounting filesystem for {:?}{}",
+        directory,
+        if read_only { " (read-only)" } else { "" }
+    );
+
+    let manager = ProjectManager::new().with_context(|| "Failed to create project manager")?;
+
+    // Canonicalize the path to match what was stored
+    let source_dir = std::fs::canonicalize(directory)
+        .with_context(|| format!("Failed to canonicalize path: {:?}", directory))?;
+
+    let project = manager.find_by_source_dir(&source_dir)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Directory not tracked: {:?}\nInitialize with: ize init {:?}",
+            source_dir,
+            directory
+        )
+    })?;
+
+    // Check if already mounted
+    if is_fuse_mounted(&source_dir)? {
+        return Err(anyhow::anyhow!(
+            "Directory is already mounted: {:?}\nUnmount with: ize unmount {:?}",
+            source_dir,
+            directory
+        ));
+    }
+
+    let mountpoint = source_dir.clone();
+    let mp_copy = mountpoint.clone();
+
+    // Create the passthrough filesystem
+    // Note: We're using the working directory as the source
+    let fs = if read_only {
+        PassthroughFS::new_read_only(project.working_dir().to_path_buf(), mp_copy.clone())?
+    } else {
+        PassthroughFS::new(project.working_dir().to_path_buf(), mp_copy.clone())?
+    };
+
+    if unmount_on_exit || foreground {
+        info!("Will unmount filesystem on exit");
+
+        // Set up signal handler for SIGINT and SIGTERM
+        let mp_for_handler = mp_copy.clone();
+        ctrlc::set_handler(move || {
+            info!("Received interrupt signal, unmounting filesystem");
+            match Command::new("fusermount")
+                .arg("-u")
+                .arg(&mp_for_handler)
+                .status()
+            {
+                Ok(status) if status.success() => {
+                    info!("Successfully unmounted filesystem")
+                }
+                Ok(status) => error!("Failed to unmount filesystem, exit code: {}", status),
+                Err(e) => error!("Failed to execute unmount command: {}", e),
+            }
+            std::process::exit(0);
+        })
+        .expect("Error setting signal handler");
+    }
+
+    println!("✓ Mounting '{}' with ize", source_dir.display());
+    println!("  Working copy: {}", project.working_dir().display());
+    println!("  Channel: {}", project.current_channel());
+    if foreground {
+        println!("  Running in foreground (Ctrl+C to unmount)");
+    }
+
+    fs.mount()?;
+
+    Ok(())
+}
+
+/// Unmount a tracked directory
+fn cmd_unmount(directory: &PathBuf) -> Result<()> {
+    let source_dir = std::fs::canonicalize(directory)
+        .with_context(|| format!("Failed to canonicalize path: {:?}", directory))?;
+
+    // Check if mounted
+    if !is_fuse_mounted(&source_dir)? {
+        return Err(anyhow::anyhow!(
+            "Directory is not mounted: {:?}",
+            source_dir
+        ));
+    }
+
+    // Use fusermount to unmount
+    let status = Command::new("fusermount")
+        .arg("-u")
+        .arg(&source_dir)
+        .status()
+        .with_context(|| "Failed to execute fusermount")?;
+
+    if status.success() {
+        println!("✓ Unmounted '{}'", source_dir.display());
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "Failed to unmount '{}' (exit code: {})",
+            source_dir.display(),
+            status
+        ))
+    }
+}
+
+/// Show status of a tracked directory
+fn cmd_status(directory: Option<&Path>, verbose: bool) -> Result<()> {
+    let manager = ProjectManager::new().with_context(|| "Failed to create project manager")?;
+
+    let source_dir = if let Some(dir) = directory {
+        std::fs::canonicalize(dir)?
+    } else {
+        std::env::current_dir()?
+    };
+
+    let project = manager.find_by_source_dir(&source_dir)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Directory not tracked: {:?}\nInitialize with: ize init <directory>",
+            source_dir
+        )
+    })?;
+
+    let is_mounted = is_fuse_mounted(&source_dir)?;
+
+    println!("Project: {}", source_dir.display());
+    println!("UUID: {}", project.uuid());
+    println!("Channel: {}", project.current_channel());
+    println!(
+        "Status: {}",
+        if is_mounted { "mounted" } else { "not mounted" }
+    );
+
+    // List available channels
+    let channels = project.list_channels()?;
+    println!("Channels: {}", channels.join(", "));
+
+    if verbose {
+        println!();
+        println!("Project directory: {}", project.project_dir.display());
+        println!("Working copy: {}", project.working_dir().display());
+        println!("Pijul directory: {}", project.pijul_dir().display());
+    }
+
+    Ok(())
+}
+
+/// List all tracked projects
+fn cmd_list(format: &str) -> Result<()> {
+    let manager = ProjectManager::new().with_context(|| "Failed to create project manager")?;
+
+    let projects = manager.list_projects()?;
+
+    if projects.is_empty() {
+        println!("No projects found.");
+        println!("Initialize one with: ize init <directory>");
+        return Ok(());
+    }
+
+    match format {
+        "json" => {
+            // Simple JSON output
+            println!("[");
+            for (i, p) in projects.iter().enumerate() {
+                let mounted = is_fuse_mounted(&p.source_dir).unwrap_or(false);
+                println!("  {{");
+                println!("    \"uuid\": \"{}\",", p.uuid);
+                println!("    \"source_dir\": \"{}\",", p.source_dir.display());
+                println!("    \"created\": \"{}\",", p.created);
+                println!("    \"channel\": \"{}\",", p.default_channel);
+                println!("    \"mounted\": {}", mounted);
+                print!("  }}");
+                if i < projects.len() - 1 {
+                    println!(",");
+                } else {
+                    println!();
+                }
+            }
+            println!("]");
+        }
+        _ => {
+            // Table format (default)
+            println!(
+                "{:<50} {:<10} {:<36}",
+                "SOURCE DIRECTORY", "MOUNTED", "UUID"
+            );
+            println!("{}", "-".repeat(96));
+            for p in projects {
+                let mounted = is_fuse_mounted(&p.source_dir).unwrap_or(false);
+                let mounted_str = if mounted { "yes" } else { "no" };
+                println!(
+                    "{:<50} {:<10} {:<36}",
+                    truncate_path(&p.source_dir, 48),
+                    mounted_str,
+                    p.uuid
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle channel subcommands
+fn cmd_channel(action: ChannelAction) -> Result<()> {
+    let manager = ProjectManager::new().with_context(|| "Failed to create project manager")?;
+
+    match action {
+        ChannelAction::Create { name, directory } => {
+            let source_dir = get_source_dir(directory)?;
+            let project = get_project(&manager, &source_dir)?;
+
+            project
+                .pijul
+                .create_channel(&name)
+                .with_context(|| format!("Failed to create channel '{}'", name))?;
+
+            println!("✓ Created channel '{}'", name);
+        }
+        ChannelAction::List { directory } => {
+            let source_dir = get_source_dir(directory)?;
+            let project = get_project(&manager, &source_dir)?;
+
+            let channels = project.list_channels()?;
+            let current = project.current_channel();
+
+            println!("Channels:");
+            for channel in channels {
+                if channel == current {
+                    println!("  * {} (current)", channel);
+                } else {
+                    println!("    {}", channel);
+                }
+            }
+        }
+        ChannelAction::Switch { name, directory } => {
+            let source_dir = get_source_dir(directory)?;
+            let mut project = get_project(&manager, &source_dir)?;
+
+            project
+                .switch_channel(&name)
+                .with_context(|| format!("Failed to switch to channel '{}'", name))?;
+
+            println!("✓ Switched to channel '{}'", name);
+        }
+        ChannelAction::Fork {
+            name,
+            from,
+            directory,
+        } => {
+            let source_dir = get_source_dir(directory)?;
+            let project = get_project(&manager, &source_dir)?;
+
+            let from_channel = from.unwrap_or_else(|| project.current_channel().to_string());
+
+            project
+                .pijul
+                .fork_channel(&from_channel, &name)
+                .with_context(|| {
+                    format!("Failed to fork channel '{}' to '{}'", from_channel, name)
+                })?;
+
+            println!("✓ Forked '{}' to '{}'", from_channel, name);
+        }
+    }
+
+    Ok(())
+}
+
+/// Remove a project from tracking
+fn cmd_remove(directory: &PathBuf, force: bool) -> Result<()> {
+    let manager = ProjectManager::new().with_context(|| "Failed to create project manager")?;
+
+    let source_dir = std::fs::canonicalize(directory)
+        .with_context(|| format!("Failed to canonicalize path: {:?}", directory))?;
+
+    // Check if project exists
+    let project = manager
+        .find_by_source_dir(&source_dir)?
+        .ok_or_else(|| anyhow::anyhow!("Directory not tracked: {:?}", source_dir))?;
+
+    // Check if mounted
+    if is_fuse_mounted(&source_dir)? {
+        return Err(anyhow::anyhow!(
+            "Cannot remove: directory is currently mounted.\nUnmount with: ize unmount {:?}",
+            directory
+        ));
+    }
+
+    if !force {
+        println!(
+            "This will remove ize tracking for '{}'",
+            source_dir.display()
+        );
+        println!("Project UUID: {}", project.uuid());
+        println!();
+        println!("The original directory will NOT be modified.");
+        println!(
+            "The working copy at '{}' will be deleted.",
+            project.working_dir().display()
+        );
+        println!();
+        print!("Are you sure? [y/N] ");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    manager.delete_project(&source_dir)?;
+    println!("✓ Removed tracking for '{}'", source_dir.display());
+
+    Ok(())
+}
+
+/// Check if a path is FUSE mounted
+fn is_fuse_mounted(path: &PathBuf) -> Result<bool> {
+    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let path_str = path.to_string_lossy();
+    Ok(mounts
+        .lines()
+        .any(|line| line.contains(&*path_str) && line.contains("fuse")))
+}
+
+/// Get the source directory, using current dir if not specified
+fn get_source_dir(directory: Option<PathBuf>) -> Result<PathBuf> {
+    let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    std::fs::canonicalize(&dir).with_context(|| format!("Failed to canonicalize path: {:?}", dir))
+}
+
+/// Get a project by source directory
+fn get_project(manager: &ProjectManager, source_dir: &PathBuf) -> Result<IzeProject> {
+    manager.find_by_source_dir(source_dir)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Directory not tracked: {:?}\nInitialize with: ize init <directory>",
+            source_dir
+        )
+    })
+}
+
+/// Truncate a path for display
+fn truncate_path(path: &PathBuf, max_len: usize) -> String {
+    let s = path.display().to_string();
+    if s.len() <= max_len {
+        s
+    } else {
+        format!("...{}", &s[s.len() - max_len + 3..])
+    }
 }

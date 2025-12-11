@@ -6,10 +6,16 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use std::sync::Arc;
-//!
-//! let passthrough = PassthroughFS::new(source_dir, mount_point)?;
+//! ```no_run
+//! # use std::sync::Arc;
+//! # use std::path::PathBuf;
+//! # use ize_lib::filesystems::passthrough::PassthroughFS;
+//! # use ize_lib::filesystems::observing::ObservingFS;
+//! # use ize_lib::operations::{OpcodeQueue, OpcodeRecorder};
+//! # fn main() -> std::io::Result<()> {
+//! # let source_dir = PathBuf::from("/tmp/source");
+//! # let mount_point = PathBuf::from("/tmp/mount");
+//! let passthrough = PassthroughFS::new(&source_dir, &mount_point)?;
 //! let inode_map = passthrough.inode_map();
 //! let queue = OpcodeQueue::new();
 //!
@@ -21,6 +27,8 @@
 //!
 //! let mut observing = ObservingFS::new(passthrough);
 //! observing.add_observer(Arc::new(recorder));
+//! # Ok(())
+//! # }
 //! ```
 
 use std::ffi::OsStr;

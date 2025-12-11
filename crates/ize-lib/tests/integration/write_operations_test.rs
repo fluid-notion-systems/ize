@@ -263,6 +263,7 @@ fn test_harness_creation_without_mount() -> io::Result<()> {
 // === Write Operations Tests ===
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_simple_file_write_creates_dirty_entry() -> io::Result<()> {
     let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
@@ -281,6 +282,7 @@ fn test_simple_file_write_creates_dirty_entry() -> io::Result<()> {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_multiple_file_writes_track_all_dirty() -> io::Result<()> {
     let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
@@ -304,6 +306,7 @@ fn test_multiple_file_writes_track_all_dirty() -> io::Result<()> {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_file_append_marks_as_dirty() -> io::Result<()> {
     let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
@@ -324,6 +327,7 @@ fn test_file_append_marks_as_dirty() -> io::Result<()> {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_large_file_write_handles_correctly() -> io::Result<()> {
     let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
@@ -341,6 +345,7 @@ fn test_large_file_write_handles_correctly() -> io::Result<()> {
 // === Directory Operations Tests ===
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_create_directory_marks_as_dirty() -> io::Result<()> {
     let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
@@ -358,6 +363,7 @@ fn test_create_directory_marks_as_dirty() -> io::Result<()> {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_nested_directory_creation_tracks_all() -> io::Result<()> {
     let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
@@ -374,6 +380,7 @@ fn test_nested_directory_creation_tracks_all() -> io::Result<()> {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_directory_with_files_tracks_correctly() -> io::Result<()> {
     let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
@@ -394,6 +401,7 @@ fn test_directory_with_files_tracks_correctly() -> io::Result<()> {
 // === Metadata Operations Tests ===
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_permission_change_marks_as_dirty() -> io::Result<()> {
     let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
@@ -411,6 +419,7 @@ fn test_permission_change_marks_as_dirty() -> io::Result<()> {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_file_truncate_marks_as_dirty() -> io::Result<()> {
     let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
@@ -432,6 +441,7 @@ fn test_file_truncate_marks_as_dirty() -> io::Result<()> {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_metadata_only_changes_track_correctly() -> io::Result<()> {
     let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 
@@ -452,6 +462,7 @@ fn test_metadata_only_changes_track_correctly() -> io::Result<()> {
 // === Mixed Operations Tests ===
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_mixed_operations_all_tracked() -> io::Result<()> {
     let mut harness = FilesystemMountHarness::new()?.with_mount()?;
 

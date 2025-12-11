@@ -119,6 +119,7 @@ enum OperationMetadata {
 // === File Operation Tracking Tests ===
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_file_create_operation_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
 
@@ -145,6 +146,7 @@ fn test_file_create_operation_tracked() {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_file_write_operations_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
 
@@ -179,6 +181,7 @@ fn test_file_write_operations_tracked() {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_file_delete_operation_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
 
@@ -200,6 +203,7 @@ fn test_file_delete_operation_tracked() {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_file_rename_operation_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
 
@@ -225,6 +229,7 @@ fn test_file_rename_operation_tracked() {
 // === Directory Operation Tracking Tests ===
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_mkdir_operation_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
 
@@ -241,6 +246,7 @@ fn test_mkdir_operation_tracked() {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_nested_mkdir_operations_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
 
@@ -264,6 +270,7 @@ fn test_nested_mkdir_operations_tracked() {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_rmdir_operation_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
 
@@ -287,6 +294,7 @@ fn test_rmdir_operation_tracked() {
 // === Metadata Operation Tracking Tests ===
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_chmod_operation_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
 
@@ -308,6 +316,7 @@ fn test_chmod_operation_tracked() {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_truncate_operation_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
 
@@ -337,6 +346,7 @@ fn test_truncate_operation_tracked() {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_timestamp_operations_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
 
@@ -369,6 +379,7 @@ fn test_timestamp_operations_tracked() {
 // === Complex Operation Sequence Tests ===
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_complex_file_operations_all_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
 
@@ -436,6 +447,7 @@ fn test_complex_file_operations_all_tracked() {
 }
 
 #[test]
+#[ignore] // Integration test - requires FUSE, run with: cargo test -- --ignored
 fn test_concurrent_operations_all_tracked() {
     let harness = OperationTrackingHarness::new().unwrap().mount().unwrap();
 

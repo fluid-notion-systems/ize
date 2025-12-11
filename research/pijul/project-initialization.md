@@ -116,21 +116,24 @@ central-dir = "~/.local/share/ize"
 
 ### Why UUIDs?
 
-- **Uniqueness:** No collisions even if user creates projects with same name
-- **Portability:** Can rename project without breaking internal references
-- **Simplicity:** No need to sanitize/escape project names for filesystem
+- **Uniqueness:** No collisions even if user initializes multiple projects
+- **Portability:** Can move/rename the source directory without breaking internal references
+- **Simplicity:** No need to sanitize/escape directory paths for filesystem
+- **Lookup:** Projects are looked up by their `source_dir` path, not by UUID
 
 ### Project Metadata (`meta/project.toml`)
 
 ```toml
 [project]
-name = "my-project"
 uuid = "550e8400-e29b-41d4-a716-446655440000"
+source_dir = "/home/user/projects/my-project"  # The directory passed to `ize init`
 created = "2024-01-15T10:30:00Z"
 
 [pijul]
 default_channel = "main"
 ```
+
+The `source_dir` is the key field - it records the directory that was passed to `ize init` and is used by `ize mount` to look up the project.
 
 ## PijulBackend
 
@@ -568,8 +571,8 @@ pub struct IzeProject {
 }
 
 impl IzeProject {
-    /// Initialize a new Ize project
-    pub fn init(project_dir: &Path, name: &str) -> Result<Self, Error> {
+    /// Initialize a new Ize project for the given source directory
+    pub fn init(project_dir: &Path, source_dir: &Path) -> Result<Self, Error> {
         let pijul_dir = project_dir.join(".pijul");
         let working_dir = project_dir.join("working");
         let meta_dir = project_dir.join("meta");
@@ -577,15 +580,20 @@ impl IzeProject {
         // Create meta directory
         std::fs::create_dir_all(&meta_dir)?;
         
-        // Initialize pijul via wrapper
+        // Initialize pijul via backend
         let pijul = PijulBackend::init(&pijul_dir, &working_dir, None)?;
+        
+        // Copy existing contents from source_dir to working_dir if source exists
+        if source_dir.exists() && source_dir.is_dir() {
+            copy_dir_contents(source_dir, &working_dir)?;
+        }
         
         // Write project metadata
         let uuid = uuid::Uuid::new_v4();
         let now = chrono::Utc::now().to_rfc3339();
         let meta_toml = format!(
-            "[project]\nname = {:?}\nuuid = {:?}\ncreated = {:?}\n\n[pijul]\ndefault_channel = {:?}\n",
-            name, uuid.to_string(), now, pijul.current_channel()
+            "[project]\nuuid = {:?}\nsource_dir = {:?}\ncreated = {:?}\n\n[pijul]\ndefault_channel = {:?}\n",
+            uuid.to_string(), source_dir.display().to_string(), now, pijul.current_channel()
         );
         std::fs::write(meta_dir.join("project.toml"), meta_toml)?;
         
@@ -651,16 +659,16 @@ impl ProjectManager {
         Ok(Self { central_dir })
     }
     
-    /// Create a new project
-    pub fn create_project(&self, name: &str) -> Result<IzeProject, Error> {
+    /// Create a new project for the given source directory
+    pub fn create_project(&self, source_dir: &Path) -> Result<IzeProject, Error> {
         let uuid = uuid::Uuid::new_v4();
         let project_dir = self.central_dir.join("projects").join(uuid.to_string());
         
-        IzeProject::init(&project_dir, name)
+        IzeProject::init(&project_dir, source_dir)
     }
     
-    /// Find a project by name
-    pub fn find_project(&self, name: &str) -> Result<Option<IzeProject>, Error> {
+    /// Find a project by its source directory path
+    pub fn find_by_source_dir(&self, source_dir: &Path) -> Result<Option<IzeProject>, Error> {
         let projects_dir = self.central_dir.join("projects");
         
         for entry in std::fs::read_dir(&projects_dir)? {
@@ -670,7 +678,7 @@ impl ProjectManager {
             if meta_path.exists() {
                 let content = std::fs::read_to_string(&meta_path)?;
                 if let Ok(meta) = toml::from_str::<ProjectMeta>(&content) {
-                    if meta.project.name == name {
+                    if Path::new(&meta.project.source_dir) == source_dir {
                         return Ok(Some(IzeProject::open(&entry.path())?));
                     }
                 }
@@ -693,9 +701,9 @@ impl ProjectManager {
                 let content = std::fs::read_to_string(&meta_path)?;
                 if let Ok(meta) = toml::from_str::<ProjectMeta>(&content) {
                     projects.push(ProjectInfo {
-                        name: meta.project.name,
                         uuid: meta.project.uuid,
-                        path: entry.path(),
+                        source_dir: PathBuf::from(&meta.project.source_dir),
+                        project_path: entry.path(),
                     });
                 }
             }
@@ -713,8 +721,8 @@ struct ProjectMeta {
 
 #[derive(Debug, Deserialize)]
 struct ProjectSection {
-    name: String,
     uuid: String,
+    source_dir: String,
     created: String,
 }
 
@@ -725,9 +733,9 @@ struct PijulSection {
 
 #[derive(Debug)]
 pub struct ProjectInfo {
-    pub name: String,
     pub uuid: String,
-    pub path: PathBuf,
+    pub source_dir: PathBuf,
+    pub project_path: PathBuf,  // Path in central store
 }
 ```
 
@@ -754,38 +762,47 @@ rlimit = "0.10"  # For max_files calculation on Unix
 
 ## CLI Commands
 
-### `ize init <name>`
+### `ize init <directory>`
 
-Create a new versioned project:
+Initialize version control for an existing directory:
 
 ```rust
-fn cmd_init(name: &str) -> Result<(), Error> {
+fn cmd_init(directory: &Path) -> Result<(), Error> {
     let manager = ProjectManager::new()?;
     
-    // Check if project with this name already exists
-    if manager.find_project(name)?.is_some() {
-        return Err(Error::ProjectExists(name.to_string()));
+    // Canonicalize the path to get absolute path
+    let source_dir = std::fs::canonicalize(directory)?;
+    
+    // Check if this directory is already tracked
+    if manager.find_by_source_dir(&source_dir)?.is_some() {
+        return Err(Error::ProjectExists(source_dir.display().to_string()));
     }
     
-    let project = manager.create_project(name)?;
+    let project = manager.create_project(&source_dir)?;
     
-    println!("Created project '{}' at {:?}", name, project.working_dir());
-    println!("Mount with: ize mount {} <mountpoint>", name);
+    println!("Initialized ize for '{}'", source_dir.display());
+    println!("Mount with: ize mount {}", source_dir.display());
     
     Ok(())
 }
 ```
 
-### `ize mount <name> <mountpoint>`
+### `ize mount <directory>`
 
-Mount an existing project:
+Mount a tracked directory (mounts at the same path, replacing the original):
 
 ```rust
-fn cmd_mount(name: &str, mountpoint: &Path) -> Result<(), Error> {
+fn cmd_mount(directory: &Path) -> Result<(), Error> {
     let manager = ProjectManager::new()?;
     
-    let project = manager.find_project(name)?
-        .ok_or_else(|| Error::ProjectNotFound(name.to_string()))?;
+    // Canonicalize the path to match what was stored
+    let source_dir = std::fs::canonicalize(directory)?;
+    
+    let project = manager.find_by_source_dir(&source_dir)?
+        .ok_or_else(|| Error::ProjectNotFound(source_dir.display().to_string()))?;
+    
+    // Mount at the original source directory location
+    let mountpoint = &source_dir;
     
     // Set up the filesystem
     let queue = OpcodeQueue::new();
@@ -805,7 +822,7 @@ fn cmd_mount(name: &str, mountpoint: &Path) -> Result<(), Error> {
     
     // Mount
     let options = vec![
-        MountOption::FSName(format!("ize-{}", name)),
+        MountOption::FSName(format!("ize:{}", source_dir.display())),
         MountOption::AutoUnmount,
         MountOption::AllowOther,
     ];
@@ -816,9 +833,75 @@ fn cmd_mount(name: &str, mountpoint: &Path) -> Result<(), Error> {
 }
 ```
 
+> **Note:** The FUSE mount replaces the original directory. When unmounted, the 
+> original directory contents are preserved in `working/` within the project store.
+
+### `ize unmount <directory>`
+
+Unmount a tracked directory:
+
+```rust
+fn cmd_unmount(directory: &Path) -> Result<(), Error> {
+    let source_dir = std::fs::canonicalize(directory)?;
+    
+    // Use fusermount to unmount
+    let status = std::process::Command::new("fusermount")
+        .arg("-u")
+        .arg(&source_dir)
+        .status()?;
+    
+    if status.success() {
+        println!("Unmounted '{}'", source_dir.display());
+    } else {
+        return Err(Error::UnmountFailed(source_dir.display().to_string()));
+    }
+    
+    Ok(())
+}
+```
+
+### `ize status [directory]`
+
+Show status of a tracked directory (or current directory if not specified):
+
+```rust
+fn cmd_status(directory: Option<&Path>) -> Result<(), Error> {
+    let manager = ProjectManager::new()?;
+    
+    let source_dir = if let Some(dir) = directory {
+        std::fs::canonicalize(dir)?
+    } else {
+        std::env::current_dir()?
+    };
+    
+    let project = manager.find_by_source_dir(&source_dir)?
+        .ok_or_else(|| Error::ProjectNotFound(source_dir.display().to_string()))?;
+    
+    // Check if currently mounted
+    let is_mounted = is_fuse_mounted(&source_dir)?;
+    
+    println!("Project: {}", source_dir.display());
+    println!("UUID: {}", project.uuid());
+    println!("Channel: {}", project.pijul.current_channel());
+    println!("Status: {}", if is_mounted { "mounted" } else { "not mounted" });
+    
+    // List available channels
+    let channels = project.pijul.list_channels()?;
+    println!("Channels: {}", channels.join(", "));
+    
+    Ok(())
+}
+
+fn is_fuse_mounted(path: &Path) -> Result<bool, Error> {
+    let mounts = std::fs::read_to_string("/proc/mounts")?;
+    let path_str = path.to_string_lossy();
+    Ok(mounts.lines().any(|line| line.contains(&*path_str) && line.contains("fuse")))
+}
+```
+
 ### `ize list`
 
-List all projects:
+List all tracked projects:
 
 ```rust
 fn cmd_list() -> Result<(), Error> {
@@ -827,18 +910,28 @@ fn cmd_list() -> Result<(), Error> {
     
     if projects.is_empty() {
         println!("No projects found.");
-        println!("Create one with: ize init <name>");
+        println!("Initialize one with: ize init <directory>");
     } else {
-        println!("{:<20} {:<36} {}", "NAME", "UUID", "PATH");
-        println!("{}", "-".repeat(80));
+        println!("{:<50} {:<36}", "SOURCE DIRECTORY", "UUID");
+        println!("{}", "-".repeat(86));
         for p in projects {
-            println!("{:<20} {:<36} {:?}", p.name, p.uuid, p.path);
+            println!("{:<50} {:<36}", p.source_dir.display(), p.uuid);
         }
     }
     
     Ok(())
 }
 ```
+
+### CLI Summary
+
+| Command | Description |
+|---------|-------------|
+| `ize init <directory>` | Initialize version control for a directory |
+| `ize mount <directory>` | Mount the versioned filesystem at the directory |
+| `ize unmount <directory>` | Unmount the versioned filesystem |
+| `ize status [directory]` | Show project status (default: current directory) |
+| `ize list` | List all tracked projects |
 
 ## Testing
 
@@ -848,16 +941,26 @@ fn cmd_list() -> Result<(), Error> {
 #[test]
 fn test_project_init() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let manager = ProjectManager::with_central_dir(temp_dir.path().to_path_buf()).unwrap();
+    let central_dir = temp_dir.path().join("central");
+    let source_dir = temp_dir.path().join("my-project");
     
-    let project = manager.create_project("test-project").unwrap();
+    // Create a source directory with some files
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("README.md"), "# My Project").unwrap();
     
-    // Verify structure
+    let manager = ProjectManager::with_central_dir(central_dir).unwrap();
+    
+    let project = manager.create_project(&source_dir).unwrap();
+    
+    // Verify structure in central store
     assert!(project.pijul_dir().exists());
     assert!(project.pijul_dir().join("pristine/db").exists());
     assert!(project.pijul_dir().join("changes").exists());
     assert!(project.working_dir().exists());
     assert!(project.meta_dir.join("project.toml").exists());
+    
+    // Verify source files were copied to working dir
+    assert!(project.working_dir().join("README.md").exists());
     
     // Verify channel exists
     let channels = project.pijul.list_channels().unwrap();
@@ -871,21 +974,28 @@ fn test_project_init() {
 #[test]
 fn test_full_project_flow() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let manager = ProjectManager::with_central_dir(temp_dir.path().to_path_buf()).unwrap();
+    let central_dir = temp_dir.path().join("central");
+    let source_dir = temp_dir.path().join("my-app");
+    
+    // Create source directory
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("main.rs"), "fn main() {}").unwrap();
+    
+    let manager = ProjectManager::with_central_dir(central_dir).unwrap();
     
     // Create project
-    let project = manager.create_project("my-app").unwrap();
+    let project = manager.create_project(&source_dir).unwrap();
     
-    // Find it
-    let found = manager.find_project("my-app").unwrap().unwrap();
+    // Find it by source directory
+    let found = manager.find_by_source_dir(&source_dir).unwrap().unwrap();
     assert_eq!(found.pijul_dir(), project.pijul_dir());
     
     // List projects
     let list = manager.list_projects().unwrap();
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].name, "my-app");
+    assert_eq!(list[0].source_dir, source_dir);
     
-    // Verify pijul wrapper is functional
+    // Verify pijul backend is functional
     let channels = project.pijul.list_channels().unwrap();
     assert!(channels.contains(&"main".to_string()));
     
@@ -894,14 +1004,47 @@ fn test_full_project_flow() {
     let channels = project.pijul.list_channels().unwrap();
     assert_eq!(channels.len(), 2);
 }
+
+#[test]
+fn test_project_not_found() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let central_dir = temp_dir.path().join("central");
+    let nonexistent_dir = temp_dir.path().join("does-not-exist");
+    
+    let manager = ProjectManager::with_central_dir(central_dir).unwrap();
+    
+    // Looking up a non-tracked directory should return None
+    let result = manager.find_by_source_dir(&nonexistent_dir).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_duplicate_init_fails() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let central_dir = temp_dir.path().join("central");
+    let source_dir = temp_dir.path().join("my-project");
+    
+    std::fs::create_dir_all(&source_dir).unwrap();
+    
+    let manager = ProjectManager::with_central_dir(central_dir).unwrap();
+    
+    // First init succeeds
+    manager.create_project(&source_dir).unwrap();
+    
+    // Second init for same directory should fail
+    let result = manager.create_project(&source_dir);
+    assert!(result.is_err());
+}
 ```
 
 ## Summary
 
-### What Happens on `ize init <name>`
+### What Happens on `ize init <directory>`
 
-1. Generate UUID for project
-2. Create directory structure:
+1. Canonicalize the directory path (resolve to absolute path)
+2. Check if directory is already tracked (lookup by `source_dir`)
+3. Generate UUID for project
+4. Create directory structure in central store:
    - `~/.local/share/ize/projects/{uuid}/`
    - `~/.local/share/ize/projects/{uuid}/.pijul/`
    - `~/.local/share/ize/projects/{uuid}/.pijul/pristine/db`
@@ -909,9 +1052,20 @@ fn test_full_project_flow() {
    - `~/.local/share/ize/projects/{uuid}/.pijul/config`
    - `~/.local/share/ize/projects/{uuid}/working/`
    - `~/.local/share/ize/projects/{uuid}/meta/`
-3. Initialize Sanakirja pristine database via `PijulBackend::init()`
-4. Create default "main" channel
-5. Write `project.toml` metadata
+5. Copy existing contents from `<directory>` to `working/`
+6. Initialize Sanakirja pristine database via `PijulBackend::init()`
+7. Create default "main" channel
+8. Write `project.toml` metadata with `source_dir` recorded
+
+### What Happens on `ize mount <directory>`
+
+1. Canonicalize the directory path
+2. Look up project by `source_dir` in project metadata
+3. Set up FUSE filesystem:
+   - `PassthroughFS` points to `working/` in central store
+   - `OpcodeRecorder` captures filesystem operations
+4. Mount FUSE at the original `<directory>` path (replacing it)
+5. All reads/writes now go through the versioned filesystem
 
 ### Key libpijul APIs (wrapped by PijulBackend)
 
@@ -935,10 +1089,33 @@ fn test_full_project_flow() {
 │                     IzeProject                          │
 │  - project_dir: PathBuf                                 │
 │  - meta_dir: PathBuf                                    │
-│  - pijul: PijulBackend ─────────────────────┐           │
+│  - backend: Box<dyn VcsBackend> ────────────┐           │
 └─────────────────────────────────────────────│───────────┘
                                               │
-┌─────────────────────────────────────────────▼───────────┐
+                        ┌─────────────────────┘
+                        │
+          ┌─────────────▼─────────────┐
+          │    «trait» VcsBackend     │
+          │  (future abstraction)     │
+          │                           │
+          │  + init()                 │
+          │  + open()                 │
+          │  + record_change()        │
+          │  + create_branch()        │
+          │  + switch_branch()        │
+          │  + list_branches()        │
+          └─────────────┬─────────────┘
+                        │
+        ┌───────────────┼───────────────┐
+        │               │               │
+        ▼               ▼               ▼
+┌───────────────┐ ┌───────────┐ ┌───────────────┐
+│ PijulBackend  │ │GitBackend │ │ OtherBackend  │
+│ (current)     │ │ (future)  │ │   (future)    │
+└───────┬───────┘ └───────────┘ └───────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────────────────────┐
 │                    PijulBackend                         │
 │  - pijul_dir: PathBuf                                   │
 │  - working_dir: PathBuf                                 │
@@ -972,3 +1149,5 @@ fn test_full_project_flow() {
 5. Update CLI `mount` command to use project paths
 6. Add `list` command to CLI
 7. Wire up opcode processor to use `PijulBackend` for recording changes
+8. (Future) Define `VcsBackend` trait and refactor `PijulBackend` to implement it
+9. (Future) Implement additional backends (Git, etc.)

@@ -151,18 +151,25 @@ pub trait FsObserver: Send + Sync {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use std::sync::Arc;
-///
-/// let passthrough = PassthroughFS::new(source_dir, mount_point)?;
+/// ```no_run
+/// # use std::sync::Arc;
+/// # use std::path::PathBuf;
+/// # use ize_lib::filesystems::passthrough::PassthroughFS;
+/// # use ize_lib::filesystems::observing::{ObservingFS, FsObserver};
+/// # fn main() -> std::io::Result<()> {
+/// # let source_dir = PathBuf::from("/tmp/source");
+/// # let mount_point = PathBuf::from("/tmp/mount");
+/// let passthrough = PassthroughFS::new(&source_dir, &mount_point)?;
 /// let mut observing = ObservingFS::new(passthrough);
 ///
-/// // Add an observer
-/// let my_observer = Arc::new(MyObserver::new());
-/// observing.add_observer(my_observer);
+/// // Add an observer (implement FsObserver trait)
+/// // let my_observer = Arc::new(MyObserver::new());
+/// // observing.add_observer(my_observer);
 ///
 /// // Mount - observers will be notified of all mutations
-/// fuser::mount2(observing, mount_point, &options)?;
+/// // fuser::mount2(observing, mount_point, &options)?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct ObservingFS<F: Filesystem> {
     /// The wrapped inner filesystem

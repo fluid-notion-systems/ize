@@ -2,27 +2,42 @@
 
 This directory contains the comprehensive test suite for Ize, built on a clean, DRY testing framework that eliminates duplicate setup code.
 
+## ⚠️ Important: FUSE Integration Tests are Ignored by Default
+
+Integration tests that require FUSE mounting are **disabled by default** because they:
+- Require FUSE to be installed and configured
+- Need elevated permissions or specific system configuration
+- Can be slow and resource-intensive
+- May interfere with other system processes
+
 ## Running Tests
 
-**Important:** Tests must be run with single-threading due to FUSE mount operations that can interfere with each other:
+### Run Unit Tests (Default - Fast)
 
 ```bash
-# Run all tests (recommended)
-RUST_BACKTRACE=full cargo test --package ize-lib -- --test-threads=1
+# Run all non-ignored tests (recommended for development)
+cargo test --package ize-lib
 
-# Run with verbose output
-RUST_BACKTRACE=full cargo test --package ize-lib -- --test-threads=1 --nocapture
-
-# Run specific test
-RUST_BACKTRACE=full cargo test --package ize-lib test_name -- --test-threads=1
-
-# Run tests matching a pattern
-RUST_BACKTRACE=full cargo test --package ize-lib passthrough2 -- --test-threads=1
+# Run only library unit tests
+cargo test --package ize-lib --lib
 ```
 
-### Why Single-Threading?
+### Run Integration Tests (Requires FUSE)
 
-The integration tests mount FUSE filesystems, which:
+```bash
+# Run ALL tests including ignored integration tests
+cargo test --package ize-lib -- --ignored --test-threads=1
+
+# Run with verbose output
+cargo test --package ize-lib -- --ignored --test-threads=1 --nocapture
+
+# Run specific ignored test
+cargo test --package ize-lib test_name -- --ignored --test-threads=1
+```
+
+### Why Single-Threading for Integration Tests?
+
+The FUSE integration tests mount filesystems, which:
 1. Require exclusive access to mount points
 2. Can interfere with each other if run in parallel
 3. Need proper cleanup between test runs
@@ -33,8 +48,8 @@ The integration tests mount FUSE filesystems, which:
 # Unit tests only (fast, can run in parallel)
 cargo test --package ize-lib --lib
 
-# Integration tests (require single-threading)
-RUST_BACKTRACE=full cargo test --package ize-lib --test mod -- --test-threads=1
+# All tests including ignored integration tests
+cargo test --package ize-lib -- --ignored --test-threads=1
 
 # Benchmarks
 cargo bench --package ize-lib
