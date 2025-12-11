@@ -2,6 +2,7 @@
 // pub mod filesystem;
 pub mod cli;
 pub mod filesystems;
+pub mod operations;
 pub mod storage;
 
 pub fn version() -> &'static str {
