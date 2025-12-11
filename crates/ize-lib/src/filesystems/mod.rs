@@ -1,5 +1,7 @@
 pub mod error;
+pub mod observing;
 pub mod passthrough;
 
-// We'll add more filesystem implementations here in the future
-// such as versioned_fs, etc.
+// Re-export key types for convenience
+pub use observing::{FsObserver, ObservingFS};
+pub use passthrough::PassthroughFS;

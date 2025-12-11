@@ -14,7 +14,7 @@ use std::io;
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
@@ -34,6 +34,10 @@ const TTL: Duration = Duration::from_secs(1);
 
 /// FUSE root inode number
 const FUSE_ROOT_ID: u64 = 1;
+
+/// Shared inode-to-path mapping type.
+/// This can be shared with observers for path resolution.
+pub type InodeMap = Arc<RwLock<HashMap<u64, PathBuf>>>;
 
 /// Stored file handle - keeps the File alive so fd remains valid
 struct FileHandle {
@@ -62,7 +66,8 @@ pub struct PassthroughFS {
     read_only: bool,
     /// Maps real inode → relative path (for inode-based lookups)
     /// Populated during lookup() and readdir()
-    inode_to_path: RwLock<HashMap<u64, PathBuf>>,
+    /// Wrapped in Arc for sharing with observers.
+    inode_to_path: InodeMap,
     /// Next file handle to assign
     next_fh: AtomicU64,
     /// Maps fh → FileHandle (keeps File alive)
@@ -110,10 +115,18 @@ impl PassthroughFS {
             source_dir,
             mount_point,
             read_only: false,
-            inode_to_path: RwLock::new(inode_to_path),
+            inode_to_path: Arc::new(RwLock::new(inode_to_path)),
             next_fh: AtomicU64::new(1),
             file_handles: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// Get a clone of the inode map for sharing with observers.
+    ///
+    /// This allows observers to resolve inodes to paths without
+    /// needing direct access to the PassthroughFS instance.
+    pub fn inode_map(&self) -> InodeMap {
+        Arc::clone(&self.inode_to_path)
     }
 
     /// Create a new read-only passthrough filesystem
@@ -181,6 +194,21 @@ impl PassthroughFS {
     /// Look up path for an inode
     fn get_path_for_inode(&self, ino: u64) -> Option<PathBuf> {
         self.inode_to_path.read().unwrap().get(&ino).cloned()
+    }
+
+    /// Look up path for an inode (public version for observers).
+    ///
+    /// Returns the relative path within the source directory for the given inode.
+    pub fn resolve_inode(&self, ino: u64) -> Option<PathBuf> {
+        self.get_path_for_inode(ino)
+    }
+
+    /// Resolve a path given a parent inode and a child name.
+    ///
+    /// This is useful for observers that receive parent + name pairs
+    /// (e.g., create, mkdir, unlink operations).
+    pub fn resolve_with_name(&self, parent_ino: u64, name: &OsStr) -> Option<PathBuf> {
+        self.get_path_for_inode(parent_ino).map(|p| p.join(name))
     }
 
     /// Get the real inode for the source directory (our root)
