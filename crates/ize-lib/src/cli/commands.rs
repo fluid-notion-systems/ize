@@ -122,6 +122,20 @@ pub enum Commands {
         #[arg(long)]
         force: bool,
     },
+
+    /// Export the pijul repository to a directory for inspection
+    ///
+    /// This copies the .pijul directory and working copy to a target directory,
+    /// allowing you to use pijul commands directly to inspect the repository.
+    ExportPijul {
+        /// Source directory (must be initialized with `ize init`)
+        #[arg(value_name = "SOURCE")]
+        source: PathBuf,
+
+        /// Target directory to export to
+        #[arg(value_name = "TARGET")]
+        target: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]

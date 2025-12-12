@@ -5,6 +5,7 @@ use ize_lib::cli::commands::{ChannelAction, Cli, Commands};
 use ize_lib::filesystems::passthrough::PassthroughFS;
 use ize_lib::{IzeProject, ProjectManager};
 use log::{error, info};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -74,6 +75,9 @@ fn main() -> Result<()> {
         }
         Commands::Remove { directory, force } => {
             cmd_remove(&directory, force)?;
+        }
+        Commands::ExportPijul { source, target } => {
+            cmd_export_pijul(&source, &target)?;
         }
     }
 
@@ -495,4 +499,91 @@ fn truncate_path(path: &PathBuf, max_len: usize) -> String {
     } else {
         format!("...{}", &s[s.len() - max_len + 3..])
     }
+}
+
+/// Export pijul repository to a directory for inspection
+fn cmd_export_pijul(source: &PathBuf, target: &PathBuf) -> Result<()> {
+    let manager = ProjectManager::new().with_context(|| "Failed to create project manager")?;
+
+    let source_dir = std::fs::canonicalize(source)
+        .with_context(|| format!("Failed to canonicalize path: {:?}", source))?;
+
+    let project = manager.find_by_source_dir(&source_dir)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Directory not tracked: {:?}\nInitialize with: ize init {:?}",
+            source_dir,
+            source
+        )
+    })?;
+
+    // Create target directory
+    if target.exists() {
+        return Err(anyhow::anyhow!(
+            "Target directory already exists: {:?}",
+            target
+        ));
+    }
+    fs::create_dir_all(target)
+        .with_context(|| format!("Failed to create target directory: {:?}", target))?;
+
+    // Copy .pijul directory
+    let pijul_source = project.pijul_dir();
+    let pijul_target = target.join(".pijul");
+    copy_dir_recursive(&pijul_source, &pijul_target)
+        .with_context(|| format!("Failed to copy .pijul directory from {:?}", pijul_source))?;
+
+    // Copy working directory contents to target root
+    let working_source = project.working_dir();
+    copy_dir_contents(&working_source, target)
+        .with_context(|| format!("Failed to copy working directory from {:?}", working_source))?;
+
+    println!("✓ Exported pijul repository to '{}'", target.display());
+    println!();
+    println!("You can now use pijul commands in this directory:");
+    println!("  cd {}", target.display());
+    println!("  pijul log");
+    println!("  pijul diff");
+    println!("  pijul list");
+
+    Ok(())
+}
+
+/// Recursively copy a directory
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let dest_path = dst.join(entry.file_name());
+
+        if path.is_dir() {
+            copy_dir_recursive(&path, &dest_path)?;
+        } else {
+            fs::copy(&path, &dest_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Copy directory contents (not the directory itself) to destination
+fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let dest_path = dst.join(entry.file_name());
+
+        if path.is_dir() {
+            copy_dir_recursive(&path, &dest_path)?;
+        } else {
+            fs::copy(&path, &dest_path)?;
+        }
+    }
+
+    Ok(())
 }
