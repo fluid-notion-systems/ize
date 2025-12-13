@@ -1,0 +1,26 @@
+[package]
+name = "izev"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "TUI interface for Ize version control filesystem"
+repository.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "izev"
+path = "src/main.rs"
+
+[dependencies]
+ize-lib = { path = "../ize-lib" }
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# CLI
+clap.workspace = true
+
+# TUI
+ratatui.workspace = true
+crossterm.workspace = true
