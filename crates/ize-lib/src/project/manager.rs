@@ -19,6 +19,8 @@ pub struct ProjectInfo {
     pub created: String,
     /// Default channel name
     pub default_channel: String,
+    /// Project name (from config or dirname fallback)
+    pub name: String,
 }
 
 /// Manages multiple Ize projects in the central store
@@ -154,12 +156,21 @@ impl ProjectManager {
             if meta_path.exists() {
                 let content = std::fs::read_to_string(&meta_path)?;
                 if let Ok(meta) = toml::from_str::<ProjectMetadata>(&content) {
+                    // Use config name if available, otherwise fallback to source dir name
+                    let name = meta.project.name.clone().unwrap_or_else(|| {
+                        PathBuf::from(&meta.project.source_dir)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "Unknown".to_string())
+                    });
+
                     projects.push(ProjectInfo {
                         uuid: meta.project.uuid,
                         source_dir: PathBuf::from(&meta.project.source_dir),
                         project_path: entry.path(),
                         created: meta.project.created,
                         default_channel: meta.pijul.default_channel,
+                        name,
                     });
                 }
             }

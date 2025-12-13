@@ -86,6 +86,7 @@ impl IzeProject {
                 uuid: uuid.clone(),
                 source_dir: source_dir.display().to_string(),
                 created: now,
+                name: None,
             },
             pijul: PijulSection {
                 default_channel: pijul.current_channel().to_string(),
@@ -191,6 +192,8 @@ pub(crate) struct ProjectSection {
     pub uuid: String,
     pub source_dir: String,
     pub created: String,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
