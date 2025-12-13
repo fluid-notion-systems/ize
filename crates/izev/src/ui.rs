@@ -74,11 +74,17 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
 
             // Highlight the hotkey character in each tab name
             let spans = match tab {
-                Tab::Projects => vec![
-                    Span::raw(" "),
-                    Span::styled("P", hotkey_style),
-                    Span::styled("rojects ", base_style),
-                ],
+                Tab::Projects => {
+                    if let Some(project) = &app.selected_project {
+                        vec![Span::raw(format!(" {} ", project.name))]
+                    } else {
+                        vec![
+                            Span::raw(" "),
+                            Span::styled("P", hotkey_style),
+                            Span::styled("rojects ", base_style),
+                        ]
+                    }
+                }
                 Tab::Channels => vec![
                     Span::raw(" "),
                     Span::styled("C", hotkey_style),
@@ -191,7 +197,7 @@ fn render_projects_view(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let header_cells = ["Source Directory", "UUID", "Created", "Channel"]
+    let header_cells = ["Name", "Source Directory", "UUID", "Created", "Channel"]
         .iter()
         .map(|h| {
             ratatui::widgets::Cell::from(*h).style(
@@ -215,13 +221,6 @@ fn render_projects_view(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default()
             };
 
-            // Get the directory name or full path
-            let source_name = project
-                .source_dir
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| project.source_dir.display().to_string());
-
             // Truncate UUID for display
             let uuid_short = if project.uuid.len() > 8 {
                 format!("{}...", &project.uuid[..8])
@@ -230,7 +229,16 @@ fn render_projects_view(frame: &mut Frame, area: Rect, app: &App) {
             };
 
             let cells = vec![
-                ratatui::widgets::Cell::from(source_name).style(Style::default().fg(Color::Cyan)),
+                ratatui::widgets::Cell::from(project.name.clone())
+                    .style(Style::default().fg(Color::Cyan)),
+                ratatui::widgets::Cell::from(
+                    project
+                        .source_dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| project.source_dir.display().to_string()),
+                )
+                .style(Style::default().fg(Color::Gray)),
                 ratatui::widgets::Cell::from(uuid_short).style(Style::default().fg(Color::Gray)),
                 ratatui::widgets::Cell::from(project.created.clone())
                     .style(Style::default().fg(Color::Gray)),
@@ -243,7 +251,8 @@ fn render_projects_view(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let widths = [
-        Constraint::Min(20),
+        Constraint::Length(15),
+        Constraint::Min(15),
         Constraint::Length(12),
         Constraint::Length(20),
         Constraint::Length(10),
@@ -274,12 +283,7 @@ fn render_stream_channel(frame: &mut Frame, area: Rect, app: &App) {
     // Show project context if selected
     let title = match &app.selected_project {
         Some(project) => {
-            let name = project
-                .source_dir
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "Unknown".to_string());
-            format!(" Stream - {} ", name)
+            format!(" Izev - {} ", project.name)
         }
         None => " Stream (no project selected) ".to_string(),
     };
