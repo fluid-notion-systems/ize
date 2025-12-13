@@ -144,6 +144,11 @@ impl PassthroughFS {
         self.read_only = read_only;
     }
 
+    /// Check if filesystem is in read-only mode
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     /// Get the source directory
     pub fn source_dir(&self) -> &Path {
         &self.source_dir

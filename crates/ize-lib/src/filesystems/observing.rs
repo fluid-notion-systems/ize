@@ -30,13 +30,16 @@
 //! ```
 
 use std::ffi::OsStr;
+use std::io;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use fuser::{
-    Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
+    Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
+
+use super::passthrough::PassthroughFS;
 
 /// Observer trait for filesystem mutations.
 ///
@@ -206,7 +209,30 @@ impl<F: Filesystem> ObservingFS<F> {
     pub fn inner_mut(&mut self) -> &mut F {
         &mut self.inner
     }
+}
 
+impl ObservingFS<PassthroughFS> {
+    /// Mount the observing filesystem.
+    ///
+    /// This delegates to the inner PassthroughFS for mount point and read-only settings.
+    pub fn mount(self) -> io::Result<()> {
+        let mut options = vec![
+            MountOption::FSName("ize".to_string()),
+            MountOption::AutoUnmount,
+            MountOption::AllowOther,
+        ];
+
+        if self.inner.is_read_only() {
+            options.push(MountOption::RO);
+        }
+
+        let mount_point = self.inner.mount_point().to_path_buf();
+        fuser::mount2(self, mount_point, &options)?;
+        Ok(())
+    }
+}
+
+impl<F: Filesystem> ObservingFS<F> {
     /// Notify all observers of a write operation.
     fn notify_write(&self, ino: u64, fh: u64, offset: i64, data: &[u8]) {
         for observer in &self.observers {

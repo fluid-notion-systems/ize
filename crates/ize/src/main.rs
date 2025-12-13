@@ -2,12 +2,17 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use env_logger::Env;
 use ize_lib::cli::commands::{ChannelAction, Cli, Commands};
+use ize_lib::filesystems::observing::ObservingFS;
 use ize_lib::filesystems::passthrough::PassthroughFS;
-use ize_lib::{IzeProject, ProjectManager};
-use log::{error, info};
+use ize_lib::operations::{OpcodeQueue, OpcodeRecorder};
+use ize_lib::{IzeProject, OpcodeRecordingBackend, PijulBackend, ProjectManager};
+use log::{error, info, warn};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -179,7 +184,7 @@ fn cmd_mount(
 
     // Create the passthrough filesystem
     // Note: We're using the working directory as the source
-    let fs = if read_only {
+    let passthrough = if read_only {
         PassthroughFS::new_read_only(project.working_dir().to_path_buf(), mp_copy.clone())?
     } else {
         PassthroughFS::new(project.working_dir().to_path_buf(), mp_copy.clone())?
@@ -211,11 +216,90 @@ fn cmd_mount(
     println!("✓ Mounting '{}' with ize", source_dir.display());
     println!("  Working copy: {}", project.working_dir().display());
     println!("  Channel: {}", project.current_channel());
+    if !read_only {
+        println!("  Recording changes to Pijul");
+    }
     if foreground {
         println!("  Running in foreground (Ctrl+C to unmount)");
     }
 
-    fs.mount()?;
+    if read_only {
+        // Read-only mode: mount passthrough directly, no opcode recording
+        passthrough
+            .mount()
+            .with_context(|| "Failed to mount filesystem")?;
+    } else {
+        // Read-write mode: set up opcode queue and recording
+        let queue = OpcodeQueue::new();
+
+        // Get the inode map for path resolution
+        let inode_map = passthrough.inode_map();
+
+        // Create the opcode recorder
+        let recorder = OpcodeRecorder::new(
+            inode_map,
+            project.working_dir().to_path_buf(),
+            queue.sender(),
+        );
+
+        // Wrap passthrough with observing filesystem
+        let mut observing_fs = ObservingFS::new(passthrough);
+        observing_fs.add_observer(Arc::new(recorder));
+
+        // Flag for shutdown
+        let running = Arc::new(AtomicBool::new(true));
+
+        // Spawn the opcode consumer thread
+        let consumer_running = running.clone();
+        let consumer_queue = queue.clone();
+        let pijul_dir = project.pijul_dir().to_path_buf();
+        let working_dir = project.working_dir().to_path_buf();
+
+        let _consumer_handle = thread::spawn(move || {
+            info!("Opcode consumer thread started");
+
+            // Open the Pijul backend for recording
+            let pijul = match PijulBackend::open(&pijul_dir, &working_dir) {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Failed to open PijulBackend: {}", e);
+                    return;
+                }
+            };
+            let backend = OpcodeRecordingBackend::new(pijul);
+
+            while consumer_running.load(Ordering::SeqCst) {
+                // Try to pop with a short timeout by polling
+                if let Some(opcode) = consumer_queue.try_pop() {
+                    match backend.apply_opcode(&opcode) {
+                        Ok(Some(hash)) => {
+                            info!("Recorded opcode #{} -> {:?}", opcode.seq(), hash);
+                        }
+                        Ok(None) => {
+                            // No change needed (e.g., writing same content)
+                            info!("Opcode #{} resulted in no change", opcode.seq());
+                        }
+                        Err(e) => {
+                            warn!("Failed to apply opcode #{}: {}", opcode.seq(), e);
+                        }
+                    }
+                } else {
+                    // Brief sleep to avoid busy-waiting
+                    thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+
+            info!("Opcode consumer thread shutting down");
+        });
+
+        // Mount the observing filesystem (this blocks until unmounted)
+        observing_fs
+            .mount()
+            .with_context(|| "Failed to mount filesystem")?;
+
+        // Signal consumer to stop
+        running.store(false, Ordering::SeqCst);
+    }
 
     Ok(())
 }
