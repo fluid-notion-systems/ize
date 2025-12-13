@@ -34,6 +34,8 @@ use std::io;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use log::debug;
+
 use fuser::{
     Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
@@ -235,6 +237,13 @@ impl ObservingFS<PassthroughFS> {
 impl<F: Filesystem> ObservingFS<F> {
     /// Notify all observers of a write operation.
     fn notify_write(&self, ino: u64, fh: u64, offset: i64, data: &[u8]) {
+        debug!(
+            "ObservingFS::notify_write(ino={}, fh={}, offset={}, data_len={})",
+            ino,
+            fh,
+            offset,
+            data.len()
+        );
         for observer in &self.observers {
             observer.on_write(ino, fh, offset, data);
         }
@@ -242,6 +251,10 @@ impl<F: Filesystem> ObservingFS<F> {
 
     /// Notify all observers of a create operation.
     fn notify_create(&self, parent: u64, name: &OsStr, mode: u32) {
+        debug!(
+            "ObservingFS::notify_create(parent={}, name={:?}, mode={:o})",
+            parent, name, mode
+        );
         for observer in &self.observers {
             observer.on_create(parent, name, mode, None);
         }
@@ -249,6 +262,10 @@ impl<F: Filesystem> ObservingFS<F> {
 
     /// Notify all observers of an unlink operation.
     fn notify_unlink(&self, parent: u64, name: &OsStr) {
+        debug!(
+            "ObservingFS::notify_unlink(parent={}, name={:?})",
+            parent, name
+        );
         for observer in &self.observers {
             observer.on_unlink(parent, name);
         }
@@ -256,13 +273,21 @@ impl<F: Filesystem> ObservingFS<F> {
 
     /// Notify all observers of a mkdir operation.
     fn notify_mkdir(&self, parent: u64, name: &OsStr, mode: u32) {
+        debug!(
+            "ObservingFS::notify_mkdir(parent={}, name={:?}, mode={:o})",
+            parent, name, mode
+        );
         for observer in &self.observers {
             observer.on_mkdir(parent, name, mode, None);
         }
     }
 
-    /// Notify all observers of an rmdir operation.
+    /// Notify all observers of a rmdir operation.
     fn notify_rmdir(&self, parent: u64, name: &OsStr) {
+        debug!(
+            "ObservingFS::notify_rmdir(parent={}, name={:?})",
+            parent, name
+        );
         for observer in &self.observers {
             observer.on_rmdir(parent, name);
         }
@@ -270,6 +295,10 @@ impl<F: Filesystem> ObservingFS<F> {
 
     /// Notify all observers of a rename operation.
     fn notify_rename(&self, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr) {
+        debug!(
+            "ObservingFS::notify_rename(parent={}, name={:?}, newparent={}, newname={:?})",
+            parent, name, newparent, newname
+        );
         for observer in &self.observers {
             observer.on_rename(parent, name, newparent, newname);
         }

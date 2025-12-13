@@ -26,6 +26,7 @@
 //! let opcode = queue.try_pop().unwrap();
 //! ```
 
+use log::debug;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
@@ -96,8 +97,14 @@ impl OpcodeQueue {
     pub fn try_push(&self, opcode: Opcode) -> Result<(), Opcode> {
         let mut inner = self.lock();
         if inner.queue.len() >= inner.capacity {
+            debug!("OpcodeQueue::try_push: queue at capacity, rejecting opcode");
             return Err(opcode);
         }
+        debug!(
+            "OpcodeQueue::try_push: pushing opcode seq={}, queue_len={}",
+            opcode.seq(),
+            inner.queue.len() + 1
+        );
         inner.queue.push_back(opcode);
         drop(inner); // Release lock before notify
         self.not_empty.notify_one();
@@ -111,6 +118,11 @@ impl OpcodeQueue {
     /// capacity enforcement.
     pub fn push(&self, opcode: Opcode) {
         let mut inner = self.lock();
+        debug!(
+            "OpcodeQueue::push: pushing opcode seq={}, queue_len={}",
+            opcode.seq(),
+            inner.queue.len() + 1
+        );
         inner.queue.push_back(opcode);
         drop(inner); // Release lock before notify
         self.not_empty.notify_one();
@@ -121,7 +133,15 @@ impl OpcodeQueue {
     /// Returns `None` if the queue is empty.
     pub fn try_pop(&self) -> Option<Opcode> {
         let mut inner = self.lock();
-        inner.queue.pop_front()
+        let result = inner.queue.pop_front();
+        if let Some(ref opcode) = result {
+            debug!(
+                "OpcodeQueue::try_pop: popped opcode seq={}, remaining={}",
+                opcode.seq(),
+                inner.queue.len()
+            );
+        }
+        result
     }
 
     /// Pop an opcode from the queue (blocking).

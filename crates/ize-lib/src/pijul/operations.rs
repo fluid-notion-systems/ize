@@ -20,6 +20,8 @@
 //! All Pijul interaction happens through the wrapped `PijulBackend`.
 //! The calling code is responsible for creating and managing `PijulBackend` instances.
 
+use log::debug;
+
 /// Backend for applying opcodes to Pijul
 ///
 /// This is a thin adapter that translates filesystem opcodes into calls
@@ -138,6 +140,11 @@ impl OpcodeRecordingBackend {
     ///
     /// Returns an error if the operation fails or is unsupported.
     pub fn apply_opcode(&self, opcode: &Opcode) -> Result<Option<Hash>, OpcodeError> {
+        debug!(
+            "OpcodeRecordingBackend::apply_opcode seq={} op={:?}",
+            opcode.seq(),
+            opcode.op()
+        );
         let message = format!("Opcode #{}: {:?}", opcode.seq(), opcode.op());
 
         match opcode.op() {
@@ -147,30 +154,52 @@ impl OpcodeRecordingBackend {
                 content,
             } => {
                 let path_str = path_to_str(path)?;
-                self.pijul
-                    .record_file_create(path_str, *mode, content, &message)
-                    .map_err(Into::into)
+                debug!(
+                    "OpcodeRecordingBackend: FileCreate path={:?} content_len={}",
+                    path_str,
+                    content.len()
+                );
+                let result = self
+                    .pijul
+                    .record_file_create(path_str, *mode, content, &message);
+                debug!("OpcodeRecordingBackend: FileCreate result={:?}", result);
+                result.map_err(Into::into)
             }
 
             Operation::FileWrite { path, offset, data } => {
                 let path_str = path_to_str(path)?;
-                self.pijul
-                    .record_file_write(path_str, *offset, data, &message)
-                    .map_err(Into::into)
+                debug!(
+                    "OpcodeRecordingBackend: FileWrite path={:?} offset={} data_len={}",
+                    path_str,
+                    offset,
+                    data.len()
+                );
+                let result = self
+                    .pijul
+                    .record_file_write(path_str, *offset, data, &message);
+                debug!("OpcodeRecordingBackend: FileWrite result={:?}", result);
+                result.map_err(Into::into)
             }
 
             Operation::FileTruncate { path, new_size } => {
                 let path_str = path_to_str(path)?;
-                self.pijul
-                    .record_file_truncate(path_str, *new_size, &message)
-                    .map_err(Into::into)
+                debug!(
+                    "OpcodeRecordingBackend: FileTruncate path={:?} new_size={}",
+                    path_str, new_size
+                );
+                let result = self
+                    .pijul
+                    .record_file_truncate(path_str, *new_size, &message);
+                debug!("OpcodeRecordingBackend: FileTruncate result={:?}", result);
+                result.map_err(Into::into)
             }
 
             Operation::FileDelete { path } => {
                 let path_str = path_to_str(path)?;
-                self.pijul
-                    .record_file_delete(path_str, &message)
-                    .map_err(Into::into)
+                debug!("OpcodeRecordingBackend: FileDelete path={:?}", path_str);
+                let result = self.pijul.record_file_delete(path_str, &message);
+                debug!("OpcodeRecordingBackend: FileDelete result={:?}", result);
+                result.map_err(Into::into)
             }
 
             Operation::FileRename { old_path, new_path } => {

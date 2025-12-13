@@ -4,6 +4,7 @@
 //! for all Pijul operations in Ize. It wraps libpijul and provides a high-level
 //! API for recording file changes and querying repository state.
 
+use log::debug;
 use std::path::{Path, PathBuf};
 
 use libpijul::alive_retrieve;
@@ -330,6 +331,11 @@ impl PijulBackend {
         content: &[u8],
         message: &str,
     ) -> Result<Option<Hash>, PijulError> {
+        debug!(
+            "PijulBackend::record_file_create path={:?} content_len={}",
+            path,
+            content.len()
+        );
         let txn = self.arc_txn_begin()?;
         let channel = self.load_channel_ref(&txn)?;
 
@@ -380,6 +386,12 @@ impl PijulBackend {
         data: &[u8],
         message: &str,
     ) -> Result<Option<Hash>, PijulError> {
+        debug!(
+            "PijulBackend::record_file_write path={:?} offset={} data_len={}",
+            path,
+            offset,
+            data.len()
+        );
         let txn = self.arc_txn_begin()?;
         let channel = self.load_channel_ref(&txn)?;
 
@@ -419,6 +431,10 @@ impl PijulBackend {
         new_size: u64,
         message: &str,
     ) -> Result<Option<Hash>, PijulError> {
+        debug!(
+            "PijulBackend::record_file_truncate path={:?} new_size={}",
+            path, new_size
+        );
         let txn = self.arc_txn_begin()?;
         let channel = self.load_channel_ref(&txn)?;
 
@@ -446,6 +462,7 @@ impl PijulBackend {
         path: &str,
         message: &str,
     ) -> Result<Option<Hash>, PijulError> {
+        debug!("PijulBackend::record_file_delete path={:?}", path);
         let txn = self.arc_txn_begin()?;
         let channel = self.load_channel_ref(&txn)?;
 
@@ -709,6 +726,11 @@ impl PijulBackend {
         new_content: &[u8],
         message: &str,
     ) -> Result<Option<Hash>, PijulError> {
+        debug!(
+            "PijulBackend::diff_and_record path={:?} new_content_len={}",
+            path,
+            new_content.len()
+        );
         // Retrieve the old content as a Graph
         let mut graph = {
             let t = txn.read();
@@ -742,8 +764,13 @@ impl PijulBackend {
 
         // Check if anything changed
         if recorded.actions.is_empty() {
+            debug!("PijulBackend::diff_and_record: no actions, returning None");
             return Ok(None);
         }
+        debug!(
+            "PijulBackend::diff_and_record: {} actions to record",
+            recorded.actions.len()
+        );
 
         // Create the change header
         let header = ChangeHeader {
@@ -783,6 +810,7 @@ impl PijulBackend {
         txn.commit()
             .map_err(|e| PijulError::Transaction(format!("{:?}", e)))?;
 
+        debug!("PijulBackend::diff_and_record: committed hash={:?}", hash);
         Ok(Some(hash))
     }
 
@@ -795,6 +823,11 @@ impl PijulBackend {
         content: Vec<u8>,
         message: &str,
     ) -> Result<Option<Hash>, PijulError> {
+        debug!(
+            "PijulBackend::record_with_memory path={:?} content_len={}",
+            path,
+            content.len()
+        );
         // Create memory working copy
         let memory = Memory::new();
 
@@ -835,8 +868,13 @@ impl PijulBackend {
 
         // Check if anything changed
         if recorded.actions.is_empty() {
+            debug!("PijulBackend::record_with_memory: no actions, returning None");
             return Ok(None);
         }
+        debug!(
+            "PijulBackend::record_with_memory: {} actions to record",
+            recorded.actions.len()
+        );
 
         // Create the change header
         let header = ChangeHeader {
@@ -876,6 +914,10 @@ impl PijulBackend {
         txn.commit()
             .map_err(|e| PijulError::Transaction(format!("{:?}", e)))?;
 
+        debug!(
+            "PijulBackend::record_with_memory: committed hash={:?}",
+            hash
+        );
         Ok(Some(hash))
     }
 

@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use log::warn;
+use log::{debug, warn};
 
 use crate::filesystems::observing::FsObserver;
 use crate::filesystems::passthrough::InodeMap;
@@ -107,7 +107,9 @@ impl OpcodeRecorder {
 
     /// Emit an opcode to the queue.
     fn emit(&self, op: Operation) {
-        let opcode = Opcode::new(self.next_seq(), op);
+        let seq = self.next_seq();
+        debug!("OpcodeRecorder::emit seq={} op={:?}", seq, op);
+        let opcode = Opcode::new(seq, op);
         if let Err(_opcode) = self.sender.try_send(opcode) {
             warn!("Failed to enqueue opcode: queue at capacity");
             // Fallback: force push to avoid losing the opcode
@@ -118,6 +120,12 @@ impl OpcodeRecorder {
 
 impl FsObserver for OpcodeRecorder {
     fn on_write(&self, ino: u64, _fh: u64, offset: i64, data: &[u8]) {
+        debug!(
+            "OpcodeRecorder::on_write(ino={}, offset={}, data_len={})",
+            ino,
+            offset,
+            data.len()
+        );
         let path = match self.resolve_inode(ino) {
             Some(p) => p,
             None => {
@@ -126,6 +134,7 @@ impl FsObserver for OpcodeRecorder {
             }
         };
 
+        debug!("OpcodeRecorder::on_write resolved path={:?}", path);
         self.emit(Operation::FileWrite {
             path,
             offset: offset as u64,
@@ -134,6 +143,10 @@ impl FsObserver for OpcodeRecorder {
     }
 
     fn on_create(&self, parent: u64, name: &OsStr, mode: u32, _result_ino: Option<u64>) {
+        debug!(
+            "OpcodeRecorder::on_create(parent={}, name={:?}, mode={:o})",
+            parent, name, mode
+        );
         let path = match self.resolve_with_name(parent, name) {
             Some(p) => p,
             None => {
@@ -142,6 +155,7 @@ impl FsObserver for OpcodeRecorder {
             }
         };
 
+        debug!("OpcodeRecorder::on_create resolved path={:?}", path);
         self.emit(Operation::FileCreate {
             path,
             mode,
@@ -150,6 +164,10 @@ impl FsObserver for OpcodeRecorder {
     }
 
     fn on_unlink(&self, parent: u64, name: &OsStr) {
+        debug!(
+            "OpcodeRecorder::on_unlink(parent={}, name={:?})",
+            parent, name
+        );
         let path = match self.resolve_with_name(parent, name) {
             Some(p) => p,
             None => {
@@ -164,6 +182,10 @@ impl FsObserver for OpcodeRecorder {
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false);
 
+        debug!(
+            "OpcodeRecorder::on_unlink resolved path={:?}, is_symlink={}",
+            path, is_symlink
+        );
         if is_symlink {
             self.emit(Operation::SymlinkDelete { path });
         } else {
