@@ -1,6 +1,7 @@
 //! Application state management
 
 use anyhow::Result;
+use ize_lib::pijul::{PijulBackend, PijulQuery};
 use ize_lib::project::{ProjectInfo, ProjectManager};
 
 use crate::event::Event;
@@ -23,14 +24,6 @@ pub enum Tab {
     Projects,
     /// Channels - view changes in different channels
     Channels,
-}
-
-/// Available channels within a project
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Channel {
-    /// Stream channel - automatically ingested changes
-    Stream,
-    // Main - checkpointed/coalesced changes (future)
 }
 
 impl Tab {
@@ -60,34 +53,6 @@ impl Tab {
         match self {
             Tab::Projects => Tab::Channels,
             Tab::Channels => Tab::Projects,
-        }
-    }
-}
-
-impl Channel {
-    /// Get display name for the channel
-    pub fn name(&self) -> &'static str {
-        match self {
-            Channel::Stream => "Stream",
-        }
-    }
-
-    /// Get all available channels
-    pub fn all() -> &'static [Channel] {
-        &[Channel::Stream]
-    }
-
-    /// Get next channel
-    pub fn next(&self) -> Channel {
-        match self {
-            Channel::Stream => Channel::Stream, // Only one for now
-        }
-    }
-
-    /// Get previous channel
-    pub fn prev(&self) -> Channel {
-        match self {
-            Channel::Stream => Channel::Stream, // Only one for now
         }
     }
 }
@@ -125,8 +90,10 @@ pub struct App {
     pub mode: Mode,
     /// Active tab
     pub active_tab: Tab,
-    /// Active channel (when on Channels tab)
-    pub active_channel: Channel,
+    /// Available channels in current project
+    pub channels: Vec<String>,
+    /// Active channel name
+    pub active_channel: String,
     /// Path to the repository (if opened directly)
     pub repo_path: String,
     /// Status message to display
@@ -137,11 +104,13 @@ pub struct App {
     pub projects_index: usize,
     /// Selected index in the change list
     pub changes_index: usize,
+    /// Selected index in channels list
+    pub channels_index: usize,
     /// Project manager instance
     project_manager: Option<ProjectManager>,
     /// Cached list of projects
     pub projects: Vec<ProjectInfo>,
-    /// Changes in the current channel (placeholder for now)
+    /// Changes in the current channel
     pub changes: Vec<ChangeEntry>,
     /// Currently selected project (for Stream view)
     pub selected_project: Option<ProjectInfo>,
@@ -187,12 +156,14 @@ impl App {
             running: true,
             mode: Mode::Normal,
             active_tab: Tab::Projects,
-            active_channel: Channel::Stream,
+            channels: vec!["Stream".to_string()],
+            active_channel: "Stream".to_string(),
             repo_path,
             status_message: Some("Press '?' for help, 'q' to quit".to_string()),
             command_buffer: String::new(),
             projects_index: 0,
             changes_index: 0,
+            channels_index: 0,
             project_manager,
             projects,
             changes,
@@ -227,6 +198,69 @@ impl App {
             if let Ok(projects) = pm.list_projects() {
                 self.projects = projects;
                 self.set_status(format!("Loaded {} projects", self.projects.len()));
+            }
+        }
+    }
+
+    /// Update available channels for the selected project
+    pub fn update_channels(&mut self) {
+        if let Some(project) = &self.selected_project {
+            // Try to get channels from the project
+            match PijulBackend::open(
+                project.project_path.join(".pijul").as_path(),
+                project.project_path.join("working").as_path(),
+            ) {
+                Ok(backend) => {
+                    match backend.list_channels() {
+                        Ok(channels) => {
+                            self.channels = channels;
+                            self.channels_index = 0;
+                            if !self.channels.is_empty() {
+                                self.active_channel = self.channels[0].clone();
+                                // Load changes for the first channel
+                                self.load_channel_changes(&backend);
+                            }
+                            self.set_status(format!("Loaded {} channels", self.channels.len()));
+                        }
+                        Err(e) => {
+                            self.set_status(format!("Error loading channels: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.set_status(format!("Error opening project: {}", e));
+                }
+            }
+        }
+    }
+
+    /// Load changes for the current channel from Pijul
+    fn load_channel_changes(&mut self, backend: &PijulBackend) {
+        let query = PijulQuery::new(backend);
+
+        match query.list_changes_detailed_reverse() {
+            Ok(change_infos) => {
+                // Convert ChangeInfo to ChangeEntry
+                self.changes = change_infos
+                    .into_iter()
+                    .map(|info| ChangeEntry {
+                        id: info.hash_short(),
+                        summary: info.message.clone(),
+                        timestamp: info.timestamp_relative(),
+                        files_changed: info.files_changed,
+                    })
+                    .collect();
+
+                self.changes_index = 0;
+                self.set_status(format!(
+                    "Loaded {} changes from channel '{}'",
+                    self.changes.len(),
+                    self.active_channel
+                ));
+            }
+            Err(e) => {
+                self.set_status(format!("Error loading changes: {}", e));
+                self.changes.clear();
             }
         }
     }
@@ -349,14 +383,38 @@ impl App {
     }
 
     fn next_channel(&mut self) {
-        if self.active_tab == Tab::Channels {
-            self.active_channel = self.active_channel.next();
+        if self.active_tab == Tab::Channels && !self.channels.is_empty() {
+            self.channels_index = (self.channels_index + 1) % self.channels.len();
+            self.active_channel = self.channels[self.channels_index].clone();
+            // Reload changes for the new channel
+            if let Some(project) = &self.selected_project {
+                if let Ok(backend) = PijulBackend::open(
+                    project.project_path.join(".pijul").as_path(),
+                    project.project_path.join("working").as_path(),
+                ) {
+                    self.load_channel_changes(&backend);
+                }
+            }
         }
     }
 
     fn prev_channel(&mut self) {
-        if self.active_tab == Tab::Channels {
-            self.active_channel = self.active_channel.prev();
+        if self.active_tab == Tab::Channels && !self.channels.is_empty() {
+            if self.channels_index == 0 {
+                self.channels_index = self.channels.len() - 1;
+            } else {
+                self.channels_index -= 1;
+            }
+            self.active_channel = self.channels[self.channels_index].clone();
+            // Reload changes for the new channel
+            if let Some(project) = &self.selected_project {
+                if let Ok(backend) = PijulBackend::open(
+                    project.project_path.join(".pijul").as_path(),
+                    project.project_path.join("working").as_path(),
+                ) {
+                    self.load_channel_changes(&backend);
+                }
+            }
         }
     }
 
@@ -442,7 +500,8 @@ impl App {
                     self.set_status(format!("Selected: {}", project.source_dir.display()));
                     // Switch to Channels tab to view this project's changes
                     self.active_tab = Tab::Channels;
-                    // TODO: Load actual changes for this project
+                    // Load channels for this project (which also loads changes)
+                    self.update_channels();
                 }
             }
             Tab::Channels => {

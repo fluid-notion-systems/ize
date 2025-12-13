@@ -880,7 +880,7 @@ impl PijulBackend {
     }
 
     /// Get a change store handle
-    fn get_change_store(&self) -> ChangeStore {
+    pub fn get_change_store(&self) -> ChangeStore {
         let changes_dir = self.changes_dir();
         ChangeStore::from_changes(changes_dir, 1024)
     }

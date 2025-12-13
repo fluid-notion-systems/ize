@@ -11,9 +11,11 @@
 //!
 //! - [`backend`]: Core PijulBackend implementation
 //! - [`operations`]: Opcode recording - converts filesystem operations into Pijul changes
+//! - [`query`]: Query operations for reading repository data
 
 pub mod backend;
 pub mod operations;
+pub mod query;
 
 // Re-export key types from backend module
 pub use backend::{
@@ -23,3 +25,6 @@ pub use backend::{
 
 // Re-export key types from operations module
 pub use operations::{OpcodeError, OpcodeRecordingBackend};
+
+// Re-export key types from query module
+pub use query::{ChangeInfo, FileInfo, PijulQuery};

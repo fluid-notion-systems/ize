@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Channel, Mode, Tab};
+use crate::app::{App, Mode, Tab};
 
 /// Main render function
 pub fn render(frame: &mut Frame, app: &App) {
@@ -130,24 +130,22 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Render the channel sub-tabs (only shown when on Channels tab)
 fn render_channel_tabs(frame: &mut Frame, area: Rect, app: &App) {
-    let titles: Vec<Line> = Channel::all()
+    let titles: Vec<Line> = app
+        .channels
         .iter()
-        .map(|ch| {
-            let style = if *ch == app.active_channel {
+        .map(|channel| {
+            let style = if *channel == app.active_channel {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            Line::from(Span::styled(format!(" {} ", ch.name()), style))
+            Line::from(Span::styled(format!(" {} ", channel), style))
         })
         .collect();
 
-    let selected = Channel::all()
-        .iter()
-        .position(|ch| *ch == app.active_channel)
-        .unwrap_or(0);
+    let selected = app.channels_index;
 
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::BOTTOM))
@@ -271,14 +269,12 @@ fn render_projects_view(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(table, area);
 }
 
-/// Render the channels view - dispatches to specific channel views
+/// Render the channels view
 fn render_channels_view(frame: &mut Frame, area: Rect, app: &App) {
-    match app.active_channel {
-        Channel::Stream => render_stream_channel(frame, area, app),
-    }
+    render_stream_channel(frame, area, app)
 }
 
-/// Render the stream channel view - list of auto-ingested changes
+/// Render the channel view - list of auto-ingested changes
 fn render_stream_channel(frame: &mut Frame, area: Rect, app: &App) {
     // Show project context if selected
     let title = match &app.selected_project {
