@@ -979,7 +979,6 @@ dependencies = [
  "env_logger",
  "fuser",
  "ize-lib",
- "libc",
  "log",
 ]
 

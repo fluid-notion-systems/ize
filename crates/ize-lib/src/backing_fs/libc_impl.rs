@@ -4,6 +4,12 @@
 //! syscalls against a pre-opened directory file descriptor.  This fd is
 //! obtained **before** the FUSE mount is established so that all operations
 //! bypass the FUSE layer entirely — no recursive re-entry.
+//!
+//! # Construction
+//!
+//! Use [`LibcBackingFs::open_dir`] to open a directory by path — the fd is
+//! owned and automatically closed on drop.  Use [`LibcBackingFs::from_raw_fd`]
+//! when the caller already holds an fd and retains ownership.
 
 use std::ffi::{CStr, CString, OsString};
 use std::io;
@@ -59,18 +65,26 @@ fn open_dir_for(base_fd: RawFd, rel: &Path) -> io::Result<RawFd> {
 /// A [`BackingFs`] backed by a pre-opened directory fd and raw libc `*at()`
 /// syscalls.
 ///
+/// # Construction
+///
+/// * [`open_dir`](Self::open_dir) — open a directory by path.  The fd is
+///   **owned** and automatically closed when the struct is dropped.
+/// * [`from_raw_fd`](Self::from_raw_fd) — wrap an existing fd.  The caller
+///   retains ownership; the fd is **not** closed on drop.
+///
 /// # Lifecycle
 ///
-/// * The caller opens `base_fd` with `O_RDONLY | O_DIRECTORY` **before**
-///   mounting the FUSE filesystem.
-/// * `LibcBackingFs` does **not** close `base_fd` on drop — the caller owns
-///   its lifetime.
+/// * The `base_fd` must be opened **before** mounting the FUSE filesystem
+///   so that `*at()` calls resolve against the underlying inode.
 /// * Individual file descriptors returned by
 ///   [`open_file`](BackingFs::open_file) **are** the caller's responsibility
 ///   to close via [`close_fd`](BackingFs::close_fd).
+#[derive(Debug)]
 pub struct LibcBackingFs {
     /// Pre-opened directory fd that anchors all `*at()` operations.
     base_fd: RawFd,
+    /// When `true`, `base_fd` is closed on [`Drop`].
+    owned: bool,
 }
 
 // SAFETY: The raw fd is just an integer handle.  All operations go through
@@ -78,15 +92,58 @@ pub struct LibcBackingFs {
 unsafe impl Send for LibcBackingFs {}
 unsafe impl Sync for LibcBackingFs {}
 
+impl Drop for LibcBackingFs {
+    fn drop(&mut self) {
+        if self.owned {
+            unsafe { libc::close(self.base_fd) };
+        }
+    }
+}
+
 impl LibcBackingFs {
-    /// Wrap an existing directory file descriptor.
+    /// Open a directory by path and return a `LibcBackingFs` that **owns**
+    /// the file descriptor.
+    ///
+    /// The fd is opened with `O_RDONLY | O_DIRECTORY | O_CLOEXEC` and will
+    /// be automatically closed when this struct is dropped.
+    ///
+    /// This should be called **before** mounting the FUSE filesystem so that
+    /// the kernel resolves the fd to the underlying inode.
+    pub fn open_dir(path: &Path) -> io::Result<Self> {
+        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "path contains interior nul")
+        })?;
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Self {
+                base_fd: fd,
+                owned: true,
+            })
+        }
+    }
+
+    /// Wrap an existing directory file descriptor **without** taking
+    /// ownership.
+    ///
+    /// The fd will **not** be closed when this struct is dropped — the
+    /// caller is responsible for its lifetime.
     ///
     /// # Safety contract (not `unsafe` but important)
     ///
     /// `base_fd` **must** be a valid, open file descriptor referring to a
     /// directory.  It must remain open for the entire lifetime of this struct.
-    pub fn new(base_fd: RawFd) -> Self {
-        Self { base_fd }
+    pub fn from_raw_fd(base_fd: RawFd) -> Self {
+        Self {
+            base_fd,
+            owned: false,
+        }
     }
 
     /// Return the underlying base directory fd.
@@ -386,8 +443,44 @@ mod tests {
     /// The `File` keeps the fd alive for the lifetime of the test.
     fn make_backing(tmpdir: &std::path::Path) -> (fs::File, LibcBackingFs) {
         let dir_file = fs::File::open(tmpdir).expect("open tmpdir");
-        let backing = LibcBackingFs::new(dir_file.as_raw_fd());
+        let backing = LibcBackingFs::from_raw_fd(dir_file.as_raw_fd());
         (dir_file, backing)
+    }
+
+    #[test]
+    fn open_dir_and_stat() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("probe.txt"), "hi").unwrap();
+
+        let backing = LibcBackingFs::open_dir(tmp.path()).expect("open_dir");
+        let st = backing.stat(Path::new("probe.txt")).unwrap();
+        assert_eq!(st.st_size, 2);
+        // fd is closed automatically when `backing` drops
+    }
+
+    #[test]
+    fn open_dir_nonexistent_fails() {
+        let err = LibcBackingFs::open_dir(Path::new("/nonexistent/path/unlikely")).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+    }
+
+    #[test]
+    fn from_raw_fd_does_not_close() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_file = fs::File::open(tmp.path()).unwrap();
+        let fd = dir_file.as_raw_fd();
+
+        {
+            let backing = LibcBackingFs::from_raw_fd(fd);
+            // backing goes out of scope — should NOT close the fd
+            let _ = backing.stat(Path::new(""));
+        }
+
+        // fd should still be valid because dir_file owns it
+        // and from_raw_fd did not close it
+        let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::fstat(fd, &mut stat_buf) };
+        assert_eq!(rc, 0, "fd should still be valid after from_raw_fd drop");
     }
 
     #[test]
