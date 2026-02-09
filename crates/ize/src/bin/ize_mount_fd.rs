@@ -52,6 +52,13 @@ struct Cli {
     /// Dump filesystem operations to stdout (opcode recording)
     #[arg(long)]
     dump: bool,
+
+    /// Ignore VCS directories (.git, .jj, .pijul) when dumping operations
+    ///
+    /// Only applies when --dump is enabled. Filters out operations on VCS
+    /// directories to match production behavior.
+    #[arg(long, requires = "dump")]
+    ignore_vcs: bool,
 }
 
 fn main() -> Result<()> {
@@ -147,6 +154,9 @@ fn main() -> Result<()> {
     }
     if cli.dump {
         println!("  Logging opcodes to tmp/dump.log");
+        if cli.ignore_vcs {
+            println!("  VCS filtering enabled");
+        }
     }
     println!("  Press Ctrl+C to unmount");
     println!();
@@ -168,13 +178,15 @@ fn main() -> Result<()> {
         let mut observing_fs = ObservingFS::new(fs);
         observing_fs.add_observer(Arc::new(recorder));
 
-        // Add VCS filtering backends
-        let vcs_backends: Vec<Box<dyn ize_lib::vcs::VcsBackend>> = vec![
-            Box::new(GitBackend),
-            Box::new(JujutsuBackend),
-            Box::new(PijulVcsBackend),
-        ];
-        observing_fs.set_vcs_backends(vcs_backends);
+        // Add VCS filtering backends if --ignore-vcs is specified
+        if cli.ignore_vcs {
+            let vcs_backends: Vec<Box<dyn ize_lib::vcs::VcsBackend>> = vec![
+                Box::new(GitBackend),
+                Box::new(JujutsuBackend),
+                Box::new(PijulVcsBackend),
+            ];
+            observing_fs.set_vcs_backends(vcs_backends);
+        }
 
         // Open log file
         std::fs::create_dir_all("tmp").context("Failed to create tmp directory")?;
