@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ize", "crates/ize-lib"]
+members = ["crates/ize", "crates/ize-lib", "crates/fuse-fd-poc"]
 exclude = ["vendor/pijul"]
 resolver = "2"
 

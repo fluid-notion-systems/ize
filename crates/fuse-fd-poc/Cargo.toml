@@ -1,0 +1,12 @@
+[package]
+name = "fuse-fd-poc"
+version = "0.1.0"
+edition = "2021"
+description = "Proof-of-concept: FUSE passthrough filesystem using pre-opened directory fd + *at() syscalls to avoid recursive mount deadlock"
+
+[dependencies]
+fuser = "0.15.1"
+libc = "0.2"
+nix = { version = "0.30.1", features = ["fs", "dir", "user"] }
+log = "0.4"
+env_logger = "0.10"
