@@ -144,9 +144,14 @@ fn main() -> Result<()> {
     if cli.read_only {
         println!("  Mode: read-only");
     }
-    if cli.dump {
-        println!("  Logging opcodes to tmp/dump.log");
-    }
+    // Determine dump log path OUTSIDE the mount to avoid recursive FUSE writes
+    let dump_log_path = if cli.dump {
+        let path = std::env::temp_dir().join("ize-dump.log");
+        println!("  Logging opcodes to {}", path.display());
+        Some(path)
+    } else {
+        None
+    };
     println!("  Press Ctrl+C to unmount");
     println!();
 
@@ -167,13 +172,13 @@ fn main() -> Result<()> {
         let mut observing_fs = ObservingFS::new(fs);
         observing_fs.add_observer(Arc::new(recorder));
 
-        // Open log file
-        std::fs::create_dir_all("tmp").context("Failed to create tmp directory")?;
+        // Open log file OUTSIDE the mount point to avoid recursive FUSE writes
+        let dump_path = dump_log_path.as_ref().unwrap();
         let log_file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open("tmp/dump.log")
-            .context("Failed to open tmp/dump.log")?;
+            .open(dump_path)
+            .with_context(|| format!("Failed to open {}", dump_path.display()))?;
         let log_file = Arc::new(Mutex::new(log_file));
 
         // Spawn opcode consumer thread
