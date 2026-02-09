@@ -10,11 +10,31 @@ bd show <id>          # View issue details
 bd update <id> --status in_progress  # Claim work
 bd close <id>         # Complete work
 bd sync               # Sync with git
+./scripts/epic-status.sh <epic-id>  # Show epic progress with completed work
 ```
 
-## check context.
+## Check Context
 
 If the user asks to check context (cc?), run bd info, to see where the project is at.
+
+## Epic Progress
+
+To see where you are in an epic with completed issues (with descriptions) and remaining issues (titles only):
+
+```bash
+./scripts/epic-status.sh <epic-id>
+```
+
+Example:
+```bash
+./scripts/epic-status.sh ize-jvi
+```
+
+This shows:
+- Epic title and ID
+- Progress (X/Y completed)
+- ✓ Completed issues with full descriptions
+- ○ Remaining issues with just titles
 
 ## Landing the Plane (Session Completion)
 
