@@ -7,6 +7,7 @@ pub mod operations;
 pub mod pijul;
 pub mod project;
 pub mod storage;
+pub mod vcs;
 
 pub use pijul::{OpcodeError, OpcodeRecordingBackend, PijulBackend, PijulError};
 pub use project::{IzeProject, ProjectError, ProjectInfo, ProjectManager};
