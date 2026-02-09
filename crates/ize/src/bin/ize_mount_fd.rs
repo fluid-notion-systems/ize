@@ -30,7 +30,6 @@ use fuser::MountOption;
 use ize_lib::backing_fs::LibcBackingFs;
 use ize_lib::filesystems::{FdPassthroughFS, ObservingFS};
 use ize_lib::operations::{OpcodeQueue, OpcodeRecorder, Operation};
-use ize_lib::vcs::{GitBackend, JujutsuBackend, PijulBackend as PijulVcsBackend};
 use log::{error, info, warn};
 
 /// Mount a directory with an fd-based FUSE passthrough filesystem.
@@ -52,16 +51,6 @@ struct Cli {
     /// Dump filesystem operations to stdout (opcode recording)
     #[arg(long)]
     dump: bool,
-
-    /// Include VCS directory operations (.git, .jj, .pijul) when dumping
-    ///
-    /// WARNING: This can cause recursive write amplification if VCS tools or
-    /// hooks respond to recorded operations. Only use for debugging VCS internals.
-    ///
-    /// By default, VCS operations are filtered to prevent feedback loops and
-    /// match production behavior.
-    #[arg(long, requires = "dump")]
-    include_vcs_ops: bool,
 }
 
 fn main() -> Result<()> {
@@ -157,11 +146,6 @@ fn main() -> Result<()> {
     }
     if cli.dump {
         println!("  Logging opcodes to tmp/dump.log");
-        if cli.include_vcs_ops {
-            println!("  Including VCS operations (WARNING: potential for recursive writes)");
-        } else {
-            println!("  VCS filtering enabled (production mode)");
-        }
     }
     println!("  Press Ctrl+C to unmount");
     println!();
@@ -182,16 +166,6 @@ fn main() -> Result<()> {
 
         let mut observing_fs = ObservingFS::new(fs);
         observing_fs.add_observer(Arc::new(recorder));
-
-        // Add VCS filtering backends unless --include-vcs-ops is specified
-        if !cli.include_vcs_ops {
-            let vcs_backends: Vec<Box<dyn ize_lib::vcs::VcsBackend>> = vec![
-                Box::new(GitBackend),
-                Box::new(JujutsuBackend),
-                Box::new(PijulVcsBackend),
-            ];
-            observing_fs.set_vcs_backends(vcs_backends);
-        }
 
         // Open log file
         std::fs::create_dir_all("tmp").context("Failed to create tmp directory")?;

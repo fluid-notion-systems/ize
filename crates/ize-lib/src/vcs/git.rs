@@ -1,20 +1,20 @@
-//! Git VCS backend implementation.
+//! Git ignore filter implementation.
 
 use std::path::Path;
 
-use super::{path_starts_with_dir, VcsBackend};
+use super::{path_starts_with_dir, IgnoreFilter};
 
-/// Git version control system backend.
+/// Git version control system ignore filter.
 ///
 /// Detects the presence of a `.git` directory and filters paths within it.
 pub struct GitBackend;
 
-impl VcsBackend for GitBackend {
+impl IgnoreFilter for GitBackend {
     fn name(&self) -> &str {
         "Git"
     }
 
-    fn vcs_dir_name(&self) -> &str {
+    fn dir_name(&self) -> &str {
         ".git"
     }
 
@@ -59,6 +59,6 @@ mod tests {
     fn test_git_metadata() {
         let backend = GitBackend;
         assert_eq!(backend.name(), "Git");
-        assert_eq!(backend.vcs_dir_name(), ".git");
+        assert_eq!(backend.dir_name(), ".git");
     }
 }

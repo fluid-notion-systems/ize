@@ -27,7 +27,7 @@ use fuser::{
 use log::{debug, error, info, warn};
 
 use crate::backing_fs::{BackingFs, DirEntry};
-use crate::vcs::VcsBackend;
+use crate::vcs::IgnoreFilter;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -110,8 +110,8 @@ pub struct FdPassthroughFS<B: BackingFs> {
     /// When `true`, all mutating operations return `EROFS`.
     read_only: bool,
 
-    /// VCS backends detected at the backing root.
-    vcs_backends: Vec<Box<dyn VcsBackend>>,
+    /// Ignore filters detected at the backing root (e.g. .git, .jj, .pijul).
+    ignore_filters: Vec<Box<dyn IgnoreFilter>>,
 
     /// The mount point path (informational only — never used for I/O).
     mount_point: PathBuf,
@@ -120,8 +120,8 @@ pub struct FdPassthroughFS<B: BackingFs> {
 impl<B: BackingFs> FdPassthroughFS<B> {
     /// Create a new fd-based passthrough filesystem.
     ///
-    /// The constructor detects VCS systems present in the backing root
-    /// using the VcsBackend trait system.
+    /// The constructor detects ignore filters (VCS directories, etc.)
+    /// present in the backing root.
     ///
     /// # Arguments
     ///
@@ -130,35 +130,35 @@ impl<B: BackingFs> FdPassthroughFS<B> {
     /// * `mount_point` — Where the FUSE filesystem will be mounted.  Used
     ///   only for logging and informational purposes.
     pub fn new(backing: B, mount_point: PathBuf) -> Self {
-        Self::with_vcs_backends(backing, mount_point, None)
+        Self::with_ignore_filters(backing, mount_point, None)
     }
 
-    /// Create a new fd-based passthrough filesystem with specific VCS backends.
+    /// Create a new fd-based passthrough filesystem with specific ignore filters.
     ///
-    /// If `vcs_backends` is `None`, VCS detection is performed automatically.
-    /// If provided, the given backends are used instead.
+    /// If `filters` is `None`, detection is performed automatically.
+    /// If provided, the given filters are used instead.
     ///
     /// # Arguments
     ///
     /// * `backing` — The [`BackingFs`] implementation
     /// * `mount_point` — Where the FUSE filesystem will be mounted
-    /// * `vcs_backends` — Optional pre-detected VCS backends
-    pub fn with_vcs_backends(
+    /// * `filters` — Optional pre-detected ignore filters
+    pub fn with_ignore_filters(
         backing: B,
         mount_point: PathBuf,
-        vcs_backends: Option<Vec<Box<dyn VcsBackend>>>,
+        filters: Option<Vec<Box<dyn IgnoreFilter>>>,
     ) -> Self {
         let mut inode_to_path = HashMap::new();
         // FUSE root inode always maps to the empty relative path.
         inode_to_path.insert(FUSE_ROOT_ID, PathBuf::new());
 
-        // Detect VCS backends or use provided ones.
-        let vcs_backends = vcs_backends.unwrap_or_else(|| Self::detect_vcs_backends(&backing));
+        // Detect ignore filters or use provided ones.
+        let ignore_filters = filters.unwrap_or_else(|| Self::detect_ignore_filters(&backing));
 
-        let vcs_names: Vec<&str> = vcs_backends.iter().map(|b| b.name()).collect();
+        let filter_names: Vec<&str> = ignore_filters.iter().map(|f| f.name()).collect();
         info!(
-            "FdPassthroughFS created — mount_point={:?}, detected VCS backends: {:?}",
-            mount_point, vcs_names
+            "FdPassthroughFS created — mount_point={:?}, detected ignore filters: {:?}",
+            mount_point, filter_names
         );
 
         Self {
@@ -167,22 +167,22 @@ impl<B: BackingFs> FdPassthroughFS<B> {
             next_fh: AtomicU64::new(1),
             open_files: RwLock::new(HashMap::new()),
             read_only: false,
-            vcs_backends,
+            ignore_filters,
             mount_point,
         }
     }
 
-    /// Detect VCS backends at the backing root.
+    /// Detect ignore filters at the backing root.
     ///
-    /// This requires converting the backing root to an absolute path for VCS detection.
-    fn detect_vcs_backends(backing: &B) -> Vec<Box<dyn VcsBackend>> {
+    /// Scans for known VCS directories and other managed directories.
+    fn detect_ignore_filters(backing: &B) -> Vec<Box<dyn IgnoreFilter>> {
         // For VCS detection, we need an actual filesystem path.
         // Since BackingFs doesn't expose the base path directly, we use a workaround:
         // try to read the backing root and check for VCS directories manually.
 
         use crate::vcs::{GitBackend, JujutsuBackend, PijulBackend};
 
-        let mut backends: Vec<Box<dyn VcsBackend>> = Vec::new();
+        let mut filters: Vec<Box<dyn IgnoreFilter>> = Vec::new();
 
         if let Ok(entries) = backing.readdir(Path::new("")) {
             let vcs_dirs: Vec<&str> = entries
@@ -193,40 +193,50 @@ impl<B: BackingFs> FdPassthroughFS<B> {
 
             // Check each VCS backend
             if vcs_dirs.contains(&".git") {
-                backends.push(Box::new(GitBackend));
+                filters.push(Box::new(GitBackend));
             }
             if vcs_dirs.contains(&".jj") {
-                backends.push(Box::new(JujutsuBackend));
+                filters.push(Box::new(JujutsuBackend));
             }
             if vcs_dirs.contains(&".pijul") {
-                backends.push(Box::new(PijulBackend));
+                filters.push(Box::new(PijulBackend));
             }
         }
 
-        backends
+        filters
     }
 
     // -- Public accessors ---------------------------------------------------
 
-    /// Check whether `rel_path` is inside a VCS directory.
+    /// Check whether `rel_path` should be ignored by any active filter.
     ///
-    /// Returns `true` if any VCS backend should ignore this path.
+    /// Returns `true` if any ignore filter matches this path.
+    pub fn is_ignored_path(&self, rel_path: &Path) -> bool {
+        self.ignore_filters
+            .iter()
+            .any(|filter| filter.should_ignore(rel_path))
+    }
+
+    /// Backward-compatible alias for `is_ignored_path`.
     pub fn is_vcs_path(&self, rel_path: &Path) -> bool {
-        self.vcs_backends
-            .iter()
-            .any(|backend| backend.should_ignore(rel_path))
+        self.is_ignored_path(rel_path)
     }
 
-    /// Return the VCS backends detected at the backing root.
-    pub fn detected_vcs_backends(&self) -> &[Box<dyn VcsBackend>] {
-        &self.vcs_backends
+    /// Return the ignore filters detected at the backing root.
+    pub fn detected_ignore_filters(&self) -> &[Box<dyn IgnoreFilter>] {
+        &self.ignore_filters
     }
 
-    /// Return the names of detected VCS systems.
+    /// Backward-compatible alias for `detected_ignore_filters`.
+    pub fn detected_vcs_backends(&self) -> &[Box<dyn IgnoreFilter>] {
+        &self.ignore_filters
+    }
+
+    /// Return the names of detected VCS/ignored directories.
     pub fn detected_vcs(&self) -> Vec<String> {
-        self.vcs_backends
+        self.ignore_filters
             .iter()
-            .map(|b| b.vcs_dir_name().to_string())
+            .map(|f| f.dir_name().to_string())
             .collect()
     }
 

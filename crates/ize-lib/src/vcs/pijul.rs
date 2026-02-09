@@ -1,20 +1,20 @@
-//! Pijul VCS backend implementation.
+//! Pijul ignore filter implementation.
 
 use std::path::Path;
 
-use super::{path_starts_with_dir, VcsBackend};
+use super::{path_starts_with_dir, IgnoreFilter};
 
-/// Pijul version control system backend.
+/// Pijul version control system ignore filter.
 ///
 /// Detects the presence of a `.pijul` directory and filters paths within it.
 pub struct PijulBackend;
 
-impl VcsBackend for PijulBackend {
+impl IgnoreFilter for PijulBackend {
     fn name(&self) -> &str {
         "Pijul"
     }
 
-    fn vcs_dir_name(&self) -> &str {
+    fn dir_name(&self) -> &str {
         ".pijul"
     }
 
@@ -58,6 +58,6 @@ mod tests {
     fn test_pijul_metadata() {
         let backend = PijulBackend;
         assert_eq!(backend.name(), "Pijul");
-        assert_eq!(backend.vcs_dir_name(), ".pijul");
+        assert_eq!(backend.dir_name(), ".pijul");
     }
 }

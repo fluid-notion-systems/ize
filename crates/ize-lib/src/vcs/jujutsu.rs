@@ -1,20 +1,20 @@
-//! Jujutsu VCS backend implementation.
+//! Jujutsu ignore filter implementation.
 
 use std::path::Path;
 
-use super::{path_starts_with_dir, VcsBackend};
+use super::{path_starts_with_dir, IgnoreFilter};
 
-/// Jujutsu version control system backend.
+/// Jujutsu version control system ignore filter.
 ///
 /// Detects the presence of a `.jj` directory and filters paths within it.
 pub struct JujutsuBackend;
 
-impl VcsBackend for JujutsuBackend {
+impl IgnoreFilter for JujutsuBackend {
     fn name(&self) -> &str {
         "Jujutsu"
     }
 
-    fn vcs_dir_name(&self) -> &str {
+    fn dir_name(&self) -> &str {
         ".jj"
     }
 
@@ -58,6 +58,6 @@ mod tests {
     fn test_jujutsu_metadata() {
         let backend = JujutsuBackend;
         assert_eq!(backend.name(), "Jujutsu");
-        assert_eq!(backend.vcs_dir_name(), ".jj");
+        assert_eq!(backend.dir_name(), ".jj");
     }
 }

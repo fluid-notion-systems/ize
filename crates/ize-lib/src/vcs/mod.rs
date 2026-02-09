@@ -1,16 +1,17 @@
-//! Version Control System (VCS) detection and filtering.
+//! Ignore filtering for VCS and other directories.
 //!
-//! This module provides a trait-based abstraction for detecting VCS directories
+//! This module provides a trait-based abstraction for detecting directories
 //! and determining which paths should be ignored during filesystem observation.
 //!
 //! # Design
 //!
-//! Each VCS (Git, Jujutsu, Pijul) implements the `VcsBackend` trait, which provides:
-//! - Detection of the VCS directory in a given path
+//! Each filter (Git, Jujutsu, Pijul, etc.) implements the `IgnoreFilter` trait,
+//! which provides:
+//! - Detection of a managed directory in a given path
 //! - Filtering logic to determine if a path should be ignored
 //!
-//! Multiple VCS systems can coexist in the same directory (e.g., both `.git` and `.jj`).
-//! The `ObservingFS` queries all detected VCS backends to decide whether to observe a path.
+//! Multiple filters can coexist (e.g., both `.git` and `.jj`).
+//! Observers use detected filters to decide whether to record an operation.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -23,85 +24,91 @@ pub use git::GitBackend;
 pub use jujutsu::JujutsuBackend;
 pub use pijul::PijulBackend;
 
-/// Trait for VCS detection and path filtering.
+/// Trait for path-based ignore filtering.
 ///
-/// Each VCS implementation (Git, Jujutsu, Pijul) provides detection logic
-/// and determines which paths should be excluded from observation.
-pub trait VcsBackend: Send + Sync {
-    /// Human-readable name of the VCS.
+/// Each implementation (Git, Jujutsu, Pijul, .gitignore, tmp/, etc.)
+/// provides detection logic and determines which paths should be excluded
+/// from observation or recording.
+pub trait IgnoreFilter: Send + Sync {
+    /// Human-readable name of the filter.
     fn name(&self) -> &str;
 
-    /// The primary directory name for this VCS (e.g., ".git", ".jj", ".pijul").
-    fn vcs_dir_name(&self) -> &str;
+    /// The primary directory name for this filter (e.g., ".git", ".jj", ".pijul").
+    fn dir_name(&self) -> &str;
 
-    /// Check if this VCS is present in the given directory.
+    /// Check if this filter is active in the given directory.
     ///
-    /// This typically checks if the VCS directory exists as a subdirectory.
+    /// This typically checks if a managed directory exists as a subdirectory.
     ///
     /// # Arguments
     /// * `base_path` - The root directory to check
     ///
     /// # Returns
-    /// `true` if the VCS directory is detected
+    /// `true` if the managed directory is detected
     fn is_present(&self, base_path: &Path) -> bool;
 
-    /// Determine if a relative path should be ignored (not observed).
+    /// Determine if a relative path should be ignored (not recorded).
     ///
     /// # Arguments
     /// * `rel_path` - Path relative to the mount point/backing root
     ///
     /// # Returns
-    /// `true` if this path should be ignored (not observed)
+    /// `true` if this path should be ignored
     fn should_ignore(&self, rel_path: &Path) -> bool;
 }
 
-/// Detect all VCS systems present in a directory.
+// Backward-compatible alias during migration
+pub use IgnoreFilter as VcsBackend;
+
+/// Detect all ignore filters present in a directory.
 ///
-/// Returns a vector of boxed VCS backends for all detected VCS systems.
+/// Returns a vector of boxed filters for all detected systems.
 ///
 /// # Arguments
-/// * `base_path` - The directory to scan for VCS systems
+/// * `base_path` - The directory to scan
 ///
 /// # Example
 /// ```no_run
 /// use std::path::Path;
-/// use ize_lib::vcs::detect_all_vcs;
+/// use ize_lib::vcs::detect_all_filters;
 ///
-/// let vcs_backends = detect_all_vcs(Path::new("/path/to/repo"));
-/// for backend in &vcs_backends {
-///     println!("Detected: {}", backend.name());
+/// let filters = detect_all_filters(Path::new("/path/to/repo"));
+/// for filter in &filters {
+///     println!("Detected: {}", filter.name());
 /// }
 /// ```
-pub fn detect_all_vcs(base_path: &Path) -> Vec<Box<dyn VcsBackend>> {
-    let mut backends: Vec<Box<dyn VcsBackend>> = Vec::new();
+pub fn detect_all_filters(base_path: &Path) -> Vec<Box<dyn IgnoreFilter>> {
+    let mut filters: Vec<Box<dyn IgnoreFilter>> = Vec::new();
 
-    // Try each VCS backend
-    let candidates: Vec<Box<dyn VcsBackend>> = vec![
+    let candidates: Vec<Box<dyn IgnoreFilter>> = vec![
         Box::new(GitBackend),
         Box::new(JujutsuBackend),
         Box::new(PijulBackend),
     ];
 
-    for backend in candidates {
-        if backend.is_present(base_path) {
-            backends.push(backend);
+    for candidate in candidates {
+        if candidate.is_present(base_path) {
+            filters.push(candidate);
         }
     }
 
-    backends
+    filters
 }
 
-/// Check if any VCS backend should ignore this path.
+/// Backward-compatible alias.
+pub fn detect_all_vcs(base_path: &Path) -> Vec<Box<dyn IgnoreFilter>> {
+    detect_all_filters(base_path)
+}
+
+/// Check if any filter says this path should be ignored.
 ///
-/// Returns `true` if at least one VCS backend says the path should be ignored.
+/// Returns `true` if at least one filter matches.
 ///
 /// # Arguments
-/// * `backends` - The detected VCS backends
+/// * `filters` - The active ignore filters
 /// * `rel_path` - Path relative to the mount point/backing root
-pub fn should_ignore_path(backends: &[Box<dyn VcsBackend>], rel_path: &Path) -> bool {
-    backends
-        .iter()
-        .any(|backend| backend.should_ignore(rel_path))
+pub fn should_ignore_path(filters: &[Box<dyn IgnoreFilter>], rel_path: &Path) -> bool {
+    filters.iter().any(|filter| filter.should_ignore(rel_path))
 }
 
 /// Helper function to check if a path starts with a specific directory component.
@@ -133,32 +140,32 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_all_vcs_empty() {
+    fn test_detect_all_filters_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let backends = detect_all_vcs(tmp.path());
-        assert_eq!(backends.len(), 0);
+        let filters = detect_all_filters(tmp.path());
+        assert_eq!(filters.len(), 0);
     }
 
     #[test]
-    fn test_detect_all_vcs_git() {
+    fn test_detect_all_filters_git() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join(".git")).unwrap();
 
-        let backends = detect_all_vcs(tmp.path());
-        assert_eq!(backends.len(), 1);
-        assert_eq!(backends[0].name(), "Git");
+        let filters = detect_all_filters(tmp.path());
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].name(), "Git");
     }
 
     #[test]
-    fn test_detect_all_vcs_multiple() {
+    fn test_detect_all_filters_multiple() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join(".git")).unwrap();
         std::fs::create_dir(tmp.path().join(".jj")).unwrap();
 
-        let backends = detect_all_vcs(tmp.path());
-        assert_eq!(backends.len(), 2);
+        let filters = detect_all_filters(tmp.path());
+        assert_eq!(filters.len(), 2);
 
-        let names: Vec<&str> = backends.iter().map(|b| b.name()).collect();
+        let names: Vec<&str> = filters.iter().map(|f| f.name()).collect();
         assert!(names.contains(&"Git"));
         assert!(names.contains(&"Jujutsu"));
     }
@@ -168,11 +175,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join(".git")).unwrap();
 
-        let backends = detect_all_vcs(tmp.path());
+        let filters = detect_all_filters(tmp.path());
 
-        assert!(should_ignore_path(&backends, Path::new(".git")));
-        assert!(should_ignore_path(&backends, Path::new(".git/objects")));
-        assert!(!should_ignore_path(&backends, Path::new("src")));
-        assert!(!should_ignore_path(&backends, Path::new("README.md")));
+        assert!(should_ignore_path(&filters, Path::new(".git")));
+        assert!(should_ignore_path(&filters, Path::new(".git/objects")));
+        assert!(!should_ignore_path(&filters, Path::new("src")));
+        assert!(!should_ignore_path(&filters, Path::new("README.md")));
+    }
+
+    #[test]
+    fn test_backward_compat_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        // detect_all_vcs still works
+        let filters = detect_all_vcs(tmp.path());
+        assert_eq!(filters.len(), 1);
     }
 }
