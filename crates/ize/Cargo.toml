@@ -19,4 +19,3 @@ fuser.workspace = true
 
 # Local dependencies
 ctrlc = "3.4"
-libc = "0.2"

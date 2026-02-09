@@ -1,7 +1,7 @@
 //! fd-based passthrough FUSE filesystem.
 //!
 //! [`FdPassthroughFS`] implements the fuser [`Filesystem`] trait by delegating
-//! all underlying I/O through a [`BackingFs`] trait object.  Because the
+//! all underlying I/O through a [`BackingFs`] implementation.  Because the
 //! backing implementation (e.g. [`LibcBackingFs`](crate::backing_fs::LibcBackingFs))
 //! operates against a pre-opened directory fd, the FUSE layer never re-enters
 //! itself — eliminating the deadlock that plagues naive passthrough mounts.
@@ -74,7 +74,7 @@ struct OpenFile {
 // FdPassthroughFS
 // ---------------------------------------------------------------------------
 
-/// A FUSE passthrough filesystem backed by a [`BackingFs`] trait object.
+/// A FUSE passthrough filesystem backed by a [`BackingFs`] implementation.
 ///
 /// All underlying I/O is performed through `self.backing`, which typically
 /// holds a pre-opened directory fd.  This design prevents FUSE re-entry
@@ -93,9 +93,9 @@ struct OpenFile {
 /// maps to an [`OpenFile`] that holds the raw fd from `BackingFs::open_file`.
 /// On `release()`, the fd is closed via `BackingFs::close_fd` and removed
 /// from the table.
-pub struct FdPassthroughFS {
+pub struct FdPassthroughFS<B: BackingFs> {
     /// The backing filesystem that performs actual I/O.
-    backing: Box<dyn BackingFs>,
+    backing: B,
 
     /// Inode → relative path within the backing store.
     ///
@@ -119,7 +119,7 @@ pub struct FdPassthroughFS {
     mount_point: PathBuf,
 }
 
-impl FdPassthroughFS {
+impl<B: BackingFs> FdPassthroughFS<B> {
     /// Create a new fd-based passthrough filesystem.
     ///
     /// The constructor scans the backing root for well-known VCS directories
@@ -132,13 +132,13 @@ impl FdPassthroughFS {
     ///   [`LibcBackingFs`](crate::backing_fs::LibcBackingFs)).
     /// * `mount_point` — Where the FUSE filesystem will be mounted.  Used
     ///   only for logging and informational purposes.
-    pub fn new(backing: Box<dyn BackingFs>, mount_point: PathBuf) -> Self {
+    pub fn new(backing: B, mount_point: PathBuf) -> Self {
         let mut inode_to_path = HashMap::new();
         // FUSE root inode always maps to the empty relative path.
         inode_to_path.insert(FUSE_ROOT_ID, PathBuf::new());
 
         // Detect VCS directories at the backing root.
-        let vcs_dirs = Self::detect_vcs_dirs(backing.as_ref());
+        let vcs_dirs = Self::detect_vcs_dirs(&backing);
 
         info!(
             "FdPassthroughFS created — mount_point={:?}, detected VCS dirs: {:?}",
@@ -157,7 +157,7 @@ impl FdPassthroughFS {
     }
 
     /// Detect VCS directories at the backing root.
-    fn detect_vcs_dirs(backing: &dyn BackingFs) -> Vec<OsString> {
+    fn detect_vcs_dirs(backing: &B) -> Vec<OsString> {
         let mut found = Vec::new();
         if let Ok(entries) = backing.readdir(Path::new("")) {
             for entry in &entries {
@@ -300,7 +300,7 @@ impl FdPassthroughFS {
 // Filesystem implementation
 // ---------------------------------------------------------------------------
 
-impl Filesystem for FdPassthroughFS {
+impl<B: BackingFs> Filesystem for FdPassthroughFS<B> {
     fn init(
         &mut self,
         _req: &Request<'_>,
@@ -1138,9 +1138,9 @@ mod tests {
     use std::os::unix::io::AsRawFd;
 
     /// Create a temp dir with a LibcBackingFs-backed FdPassthroughFS.
-    fn make_fs(tmp: &std::path::Path) -> (fs::File, FdPassthroughFS) {
+    fn make_fs(tmp: &std::path::Path) -> (fs::File, FdPassthroughFS<LibcBackingFs>) {
         let dir_file = fs::File::open(tmp).expect("open tmpdir");
-        let backing = Box::new(LibcBackingFs::new(dir_file.as_raw_fd()));
+        let backing = LibcBackingFs::from_raw_fd(dir_file.as_raw_fd());
         let fs = FdPassthroughFS::new(backing, tmp.to_path_buf());
         (dir_file, fs)
     }
@@ -1197,7 +1197,7 @@ mod tests {
         let (_hold, fs) = make_fs(tmp.path());
 
         let st = fs.backing.stat(Path::new("")).unwrap();
-        let attr = FdPassthroughFS::stat_to_attr(&st, FUSE_ROOT_ID);
+        let attr = FdPassthroughFS::<LibcBackingFs>::stat_to_attr(&st, FUSE_ROOT_ID);
         assert_eq!(attr.ino, FUSE_ROOT_ID);
         assert_eq!(attr.kind, FileType::Directory);
     }
@@ -1210,7 +1210,7 @@ mod tests {
         let (_hold, fs_inst) = make_fs(tmp.path());
 
         let st = fs_inst.backing.stat(Path::new("test.txt")).unwrap();
-        let attr = FdPassthroughFS::stat_to_attr(&st, st.st_ino);
+        let attr = FdPassthroughFS::<LibcBackingFs>::stat_to_attr(&st, st.st_ino);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.size, 5);
     }
@@ -1218,34 +1218,37 @@ mod tests {
     #[test]
     fn dtype_to_filetype_mapping() {
         assert_eq!(
-            FdPassthroughFS::dtype_to_filetype(libc::DT_DIR),
+            FdPassthroughFS::<LibcBackingFs>::dtype_to_filetype(libc::DT_DIR),
             FileType::Directory
         );
         assert_eq!(
-            FdPassthroughFS::dtype_to_filetype(libc::DT_REG),
+            FdPassthroughFS::<LibcBackingFs>::dtype_to_filetype(libc::DT_REG),
             FileType::RegularFile
         );
         assert_eq!(
-            FdPassthroughFS::dtype_to_filetype(libc::DT_LNK),
+            FdPassthroughFS::<LibcBackingFs>::dtype_to_filetype(libc::DT_LNK),
             FileType::Symlink
         );
         assert_eq!(
-            FdPassthroughFS::dtype_to_filetype(libc::DT_BLK),
+            FdPassthroughFS::<LibcBackingFs>::dtype_to_filetype(libc::DT_BLK),
             FileType::BlockDevice
         );
         assert_eq!(
-            FdPassthroughFS::dtype_to_filetype(libc::DT_CHR),
+            FdPassthroughFS::<LibcBackingFs>::dtype_to_filetype(libc::DT_CHR),
             FileType::CharDevice
         );
         assert_eq!(
-            FdPassthroughFS::dtype_to_filetype(libc::DT_FIFO),
+            FdPassthroughFS::<LibcBackingFs>::dtype_to_filetype(libc::DT_FIFO),
             FileType::NamedPipe
         );
         assert_eq!(
-            FdPassthroughFS::dtype_to_filetype(libc::DT_SOCK),
+            FdPassthroughFS::<LibcBackingFs>::dtype_to_filetype(libc::DT_SOCK),
             FileType::Socket
         );
-        assert_eq!(FdPassthroughFS::dtype_to_filetype(0), FileType::RegularFile);
+        assert_eq!(
+            FdPassthroughFS::<LibcBackingFs>::dtype_to_filetype(0),
+            FileType::RegularFile
+        );
     }
 
     #[test]

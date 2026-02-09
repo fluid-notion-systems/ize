@@ -15,8 +15,6 @@
 //!
 //! Press Ctrl+C to unmount and exit.
 
-use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -64,35 +62,24 @@ fn main() -> Result<()> {
     info!("Target directory: {:?}", target_dir);
 
     // ------------------------------------------------------------------
-    // 1. Open the directory fd BEFORE mounting — this is the critical step
+    // 1. Open the directory fd BEFORE mounting — this is the critical step.
+    //    LibcBackingFs::open_dir owns the fd and closes it on drop.
     // ------------------------------------------------------------------
 
-    let dir_cpath = CString::new(target_dir.as_os_str().as_bytes())
-        .context("directory path contains interior nul byte")?;
+    let backing = LibcBackingFs::open_dir(&target_dir)
+        .with_context(|| format!("Failed to open backing directory: {:?}", target_dir))?;
 
-    let base_fd = unsafe {
-        libc::open(
-            dir_cpath.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
-    if base_fd < 0 {
-        anyhow::bail!(
-            "Failed to open base directory fd: {}",
-            std::io::Error::last_os_error()
-        );
-    }
     info!(
         "Opened base directory fd={} for {:?} (BEFORE mount)",
-        base_fd, target_dir
+        backing.base_fd(),
+        target_dir
     );
 
     // ------------------------------------------------------------------
-    // 2. Create BackingFs + FdPassthroughFS from library types
+    // 2. Create FdPassthroughFS from the backing store
     // ------------------------------------------------------------------
 
-    let backing = LibcBackingFs::new(base_fd);
-    let mut fs = FdPassthroughFS::new(Box::new(backing), target_dir.clone());
+    let mut fs = FdPassthroughFS::new(backing, target_dir.clone());
 
     if cli.read_only {
         fs.set_read_only(true);
@@ -151,23 +138,29 @@ fn main() -> Result<()> {
     println!();
 
     info!(
-        "Mounting FUSE on {:?} (base_fd={} opened before mount — *at() calls bypass FUSE)",
-        mount_point, base_fd
+        "Mounting FUSE on {:?} (*at() calls bypass FUSE via pre-opened fd)",
+        mount_point
     );
 
     // mount2 blocks until the filesystem is unmounted.
+    // When it returns, `fs` is dropped, which drops `LibcBackingFs`,
+    // which closes the base_fd automatically.
     if let Err(e) = fuser::mount2(fs, &mount_point, &options) {
-        // Close the base fd on failure.
-        unsafe { libc::close(base_fd) };
-        anyhow::bail!("FUSE mount failed: {}\n\nHints:\n  • You may need to run as root\n  • Add 'user_allow_other' to /etc/fuse.conf\n  • Ensure 'fuse' kernel module is loaded (modprobe fuse)", e);
+        anyhow::bail!(
+            "FUSE mount failed: {}\n\n\
+             Hints:\n  \
+             • You may need to run as root\n  \
+             • Add 'user_allow_other' to /etc/fuse.conf\n  \
+             • Ensure 'fuse' kernel module is loaded (modprobe fuse)",
+            e
+        );
     }
 
     // ------------------------------------------------------------------
     // 5. Cleanup (reached after unmount)
+    //    base_fd was already closed by LibcBackingFs::drop
     // ------------------------------------------------------------------
 
-    unsafe { libc::close(base_fd) };
-    info!("Closed base_fd={}", base_fd);
     println!("✓ Unmounted '{}'", mount_display);
 
     Ok(())
