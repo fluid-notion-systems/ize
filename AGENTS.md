@@ -15,7 +15,7 @@ bd sync               # Sync with git
 
 ## Check Context
 
-If the user asks to check context (cc?), run bd info, to see where the project is at.
+If the user asks to check context (cc?), run bd ready, to see where the project is at.
 
 ## Epic Progress
 

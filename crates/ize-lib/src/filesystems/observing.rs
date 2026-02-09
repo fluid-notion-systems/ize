@@ -30,6 +30,7 @@
 //! ```
 
 use std::ffi::OsStr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -37,6 +38,8 @@ use fuser::{
     Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
     ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
+
+use crate::vcs::VcsBackend;
 
 /// Observer trait for filesystem mutations.
 ///
@@ -176,6 +179,31 @@ pub struct ObservingFS<F: Filesystem> {
     inner: F,
     /// List of observers to notify on mutations
     observers: Vec<Arc<dyn FsObserver>>,
+    /// VCS backends for filtering paths that should not be observed
+    vcs_backends: Vec<Box<dyn VcsBackend>>,
+}
+
+/// Macro to check and return early if any provided path should be ignored by VCS filtering.
+macro_rules! check_vcs_filter {
+    ($self:expr, $path:expr) => {
+        if let Some(p) = $path {
+            if $self.should_ignore_path(p) {
+                return;
+            }
+        }
+    };
+    ($self:expr, $path1:expr, $path2:expr) => {
+        if let Some(p) = $path1 {
+            if $self.should_ignore_path(p) {
+                return;
+            }
+        }
+        if let Some(p) = $path2 {
+            if $self.should_ignore_path(p) {
+                return;
+            }
+        }
+    };
 }
 
 impl<F: Filesystem> ObservingFS<F> {
@@ -187,6 +215,7 @@ impl<F: Filesystem> ObservingFS<F> {
         Self {
             inner,
             observers: Vec::new(),
+            vcs_backends: Vec::new(),
         }
     }
 
@@ -207,43 +236,83 @@ impl<F: Filesystem> ObservingFS<F> {
         &mut self.inner
     }
 
-    /// Notify all observers of a write operation.
-    fn notify_write(&self, ino: u64, fh: u64, offset: i64, data: &[u8]) {
+    /// Set VCS backends for path filtering.
+    ///
+    /// Paths that match any VCS backend's ignore rules will not trigger
+    /// observer notifications.
+    ///
+    /// # Arguments
+    /// * `backends` - VCS backends to use for filtering
+    pub fn set_vcs_backends(&mut self, backends: Vec<Box<dyn VcsBackend>>) {
+        self.vcs_backends = backends;
+    }
+
+    /// Check if a path should be ignored (not observed) based on VCS filtering.
+    ///
+    /// Returns `true` if any VCS backend says this path should be ignored.
+    fn should_ignore_path(&self, path: &Path) -> bool {
+        self.vcs_backends
+            .iter()
+            .any(|backend| backend.should_ignore(path))
+    }
+
+    /// Notify all observers of a write operation (with VCS filtering).
+    fn notify_write(&self, ino: u64, fh: u64, offset: i64, data: &[u8], path: Option<&Path>) {
+        check_vcs_filter!(self, path);
+
         for observer in &self.observers {
             observer.on_write(ino, fh, offset, data);
         }
     }
 
-    /// Notify all observers of a create operation.
-    fn notify_create(&self, parent: u64, name: &OsStr, mode: u32) {
+    /// Notify all observers of a create operation (with VCS filtering).
+    fn notify_create(&self, parent: u64, name: &OsStr, mode: u32, path: Option<&Path>) {
+        check_vcs_filter!(self, path);
+
         for observer in &self.observers {
             observer.on_create(parent, name, mode, None);
         }
     }
 
-    /// Notify all observers of an unlink operation.
-    fn notify_unlink(&self, parent: u64, name: &OsStr) {
+    /// Notify all observers of an unlink operation (with VCS filtering).
+    fn notify_unlink(&self, parent: u64, name: &OsStr, path: Option<&Path>) {
+        check_vcs_filter!(self, path);
+
         for observer in &self.observers {
             observer.on_unlink(parent, name);
         }
     }
 
-    /// Notify all observers of a mkdir operation.
-    fn notify_mkdir(&self, parent: u64, name: &OsStr, mode: u32) {
+    /// Notify all observers of a mkdir operation (with VCS filtering).
+    fn notify_mkdir(&self, parent: u64, name: &OsStr, mode: u32, path: Option<&Path>) {
+        check_vcs_filter!(self, path);
+
         for observer in &self.observers {
             observer.on_mkdir(parent, name, mode, None);
         }
     }
 
-    /// Notify all observers of an rmdir operation.
-    fn notify_rmdir(&self, parent: u64, name: &OsStr) {
+    /// Notify all observers of an rmdir operation (with VCS filtering).
+    fn notify_rmdir(&self, parent: u64, name: &OsStr, path: Option<&Path>) {
+        check_vcs_filter!(self, path);
+
         for observer in &self.observers {
             observer.on_rmdir(parent, name);
         }
     }
 
-    /// Notify all observers of a rename operation.
-    fn notify_rename(&self, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr) {
+    /// Notify all observers of a rename operation (with VCS filtering).
+    fn notify_rename(
+        &self,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        old_path: Option<&Path>,
+        new_path: Option<&Path>,
+    ) {
+        check_vcs_filter!(self, old_path, new_path);
+
         for observer in &self.observers {
             observer.on_rename(parent, name, newparent, newname);
         }
@@ -402,7 +471,7 @@ impl<F: Filesystem> Filesystem for ObservingFS<F> {
         reply: ReplyWrite,
     ) {
         // Notify observers first
-        self.notify_write(ino, fh, offset, data);
+        self.notify_write(ino, fh, offset, data, None);
 
         // Delegate to inner filesystem
         self.inner.write(
@@ -429,7 +498,7 @@ impl<F: Filesystem> Filesystem for ObservingFS<F> {
         reply: ReplyCreate,
     ) {
         // Notify observers first
-        self.notify_create(parent, name, mode);
+        self.notify_create(parent, name, mode, None);
 
         // Delegate to inner filesystem
         self.inner
@@ -438,7 +507,7 @@ impl<F: Filesystem> Filesystem for ObservingFS<F> {
 
     fn unlink(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         // Notify observers first
-        self.notify_unlink(parent, name);
+        self.notify_unlink(parent, name, None);
 
         // Delegate to inner filesystem
         self.inner.unlink(req, parent, name, reply)
@@ -454,7 +523,7 @@ impl<F: Filesystem> Filesystem for ObservingFS<F> {
         reply: ReplyEntry,
     ) {
         // Notify observers first
-        self.notify_mkdir(parent, name, mode);
+        self.notify_mkdir(parent, name, mode, None);
 
         // Delegate to inner filesystem
         self.inner.mkdir(req, parent, name, mode, umask, reply)
@@ -462,7 +531,7 @@ impl<F: Filesystem> Filesystem for ObservingFS<F> {
 
     fn rmdir(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         // Notify observers first
-        self.notify_rmdir(parent, name);
+        self.notify_rmdir(parent, name, None);
 
         // Delegate to inner filesystem
         self.inner.rmdir(req, parent, name, reply)
@@ -479,7 +548,7 @@ impl<F: Filesystem> Filesystem for ObservingFS<F> {
         reply: ReplyEmpty,
     ) {
         // Notify observers first
-        self.notify_rename(parent, name, newparent, newname);
+        self.notify_rename(parent, name, newparent, newname, None, None);
 
         // Delegate to inner filesystem
         self.inner
@@ -663,7 +732,7 @@ mod tests {
         observing.add_observer(observer.clone());
 
         // Directly call notify to test the notification mechanism
-        observing.notify_write(1, 1, 0, b"hello");
+        observing.notify_write(1, 1, 0, b"hello", None);
 
         assert_eq!(observer.write_count(), 1);
     }
@@ -676,7 +745,7 @@ mod tests {
         let observer = Arc::new(CountingObserver::new());
         observing.add_observer(observer.clone());
 
-        observing.notify_create(1, OsStr::new("test.txt"), 0o644);
+        observing.notify_create(1, OsStr::new("test.txt"), 0o644, None);
 
         assert_eq!(observer.create_count(), 1);
     }
@@ -689,7 +758,7 @@ mod tests {
         let observer = Arc::new(CountingObserver::new());
         observing.add_observer(observer.clone());
 
-        observing.notify_unlink(1, OsStr::new("test.txt"));
+        observing.notify_unlink(1, OsStr::new("test.txt"), None);
 
         assert_eq!(observer.unlink_count(), 1);
     }
@@ -702,7 +771,7 @@ mod tests {
         let observer = Arc::new(CountingObserver::new());
         observing.add_observer(observer.clone());
 
-        observing.notify_mkdir(1, OsStr::new("subdir"), 0o755);
+        observing.notify_mkdir(1, OsStr::new("subdir"), 0o755, None);
 
         assert_eq!(observer.mkdir_count(), 1);
     }
@@ -715,7 +784,7 @@ mod tests {
         let observer = Arc::new(CountingObserver::new());
         observing.add_observer(observer.clone());
 
-        observing.notify_rmdir(1, OsStr::new("subdir"));
+        observing.notify_rmdir(1, OsStr::new("subdir"), None);
 
         assert_eq!(observer.rmdir_count(), 1);
     }
@@ -728,7 +797,14 @@ mod tests {
         let observer = Arc::new(CountingObserver::new());
         observing.add_observer(observer.clone());
 
-        observing.notify_rename(1, OsStr::new("old.txt"), 2, OsStr::new("new.txt"));
+        observing.notify_rename(
+            1,
+            OsStr::new("old.txt"),
+            2,
+            OsStr::new("new.txt"),
+            None,
+            None,
+        );
 
         assert_eq!(observer.rename_count(), 1);
     }
@@ -758,10 +834,120 @@ mod tests {
         observing.add_observer(observer2.clone());
 
         // Trigger a write notification
-        observing.notify_write(1, 1, 0, b"hello");
+        observing.notify_write(1, 1, 0, b"hello", None);
 
         // Both observers should be notified
         assert_eq!(observer1.write_count(), 1);
         assert_eq!(observer2.write_count(), 1);
+    }
+
+    #[test]
+    fn test_vcs_filtering_blocks_git_notifications() {
+        use crate::vcs::GitBackend;
+
+        let mock = MockFilesystem;
+        let mut observing = ObservingFS::new(mock);
+
+        let observer = Arc::new(CountingObserver::new());
+        observing.add_observer(observer.clone());
+
+        // Set up VCS filtering for Git
+        let backends: Vec<Box<dyn VcsBackend>> = vec![Box::new(GitBackend)];
+        observing.set_vcs_backends(backends);
+
+        // Notify with a .git path - should be filtered
+        observing.notify_write(1, 1, 0, b"data", Some(Path::new(".git/objects/abc")));
+        assert_eq!(observer.write_count(), 0);
+
+        // Notify with a non-VCS path - should pass through
+        observing.notify_write(2, 2, 0, b"data", Some(Path::new("src/main.rs")));
+        assert_eq!(observer.write_count(), 1);
+    }
+
+    #[test]
+    fn test_vcs_filtering_multiple_backends() {
+        use crate::vcs::{GitBackend, JujutsuBackend};
+
+        let mock = MockFilesystem;
+        let mut observing = ObservingFS::new(mock);
+
+        let observer = Arc::new(CountingObserver::new());
+        observing.add_observer(observer.clone());
+
+        // Set up VCS filtering for Git and Jujutsu
+        let backends: Vec<Box<dyn VcsBackend>> =
+            vec![Box::new(GitBackend), Box::new(JujutsuBackend)];
+        observing.set_vcs_backends(backends);
+
+        // Both .git and .jj should be filtered
+        observing.notify_create(1, OsStr::new("test"), 0o644, Some(Path::new(".git/test")));
+        assert_eq!(observer.create_count(), 0);
+
+        observing.notify_create(
+            1,
+            OsStr::new("test"),
+            0o644,
+            Some(Path::new(".jj/repo/test")),
+        );
+        assert_eq!(observer.create_count(), 0);
+
+        // Regular paths should pass through
+        observing.notify_create(1, OsStr::new("test"), 0o644, Some(Path::new("src/test")));
+        assert_eq!(observer.create_count(), 1);
+    }
+
+    #[test]
+    fn test_vcs_filtering_all_operations() {
+        use crate::vcs::GitBackend;
+
+        let mock = MockFilesystem;
+        let mut observing = ObservingFS::new(mock);
+
+        let observer = Arc::new(CountingObserver::new());
+        observing.add_observer(observer.clone());
+
+        let backends: Vec<Box<dyn VcsBackend>> = vec![Box::new(GitBackend)];
+        observing.set_vcs_backends(backends);
+
+        // All operations on .git paths should be filtered
+        observing.notify_write(1, 1, 0, b"data", Some(Path::new(".git/index")));
+        observing.notify_create(1, OsStr::new("file"), 0o644, Some(Path::new(".git/file")));
+        observing.notify_unlink(1, OsStr::new("file"), Some(Path::new(".git/file")));
+        observing.notify_mkdir(1, OsStr::new("dir"), 0o755, Some(Path::new(".git/dir")));
+        observing.notify_rmdir(1, OsStr::new("dir"), Some(Path::new(".git/dir")));
+        observing.notify_rename(
+            1,
+            OsStr::new("old"),
+            1,
+            OsStr::new("new"),
+            Some(Path::new(".git/old")),
+            Some(Path::new(".git/new")),
+        );
+
+        // No notifications should have been sent
+        assert_eq!(observer.write_count(), 0);
+        assert_eq!(observer.create_count(), 0);
+        assert_eq!(observer.unlink_count(), 0);
+        assert_eq!(observer.mkdir_count(), 0);
+        assert_eq!(observer.rmdir_count(), 0);
+        assert_eq!(observer.rename_count(), 0);
+    }
+
+    #[test]
+    fn test_vcs_filtering_with_none_path() {
+        use crate::vcs::GitBackend;
+
+        let mock = MockFilesystem;
+        let mut observing = ObservingFS::new(mock);
+
+        let observer = Arc::new(CountingObserver::new());
+        observing.add_observer(observer.clone());
+
+        let backends: Vec<Box<dyn VcsBackend>> = vec![Box::new(GitBackend)];
+        observing.set_vcs_backends(backends);
+
+        // When path is None, filtering is skipped and notification goes through
+        observing.notify_write(1, 1, 0, b"data", None);
+        assert_eq!(observer.write_count(), 1);
     }
 }

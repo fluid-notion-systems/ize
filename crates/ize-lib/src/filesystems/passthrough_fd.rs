@@ -27,6 +27,7 @@ use fuser::{
 use log::{debug, error, info, warn};
 
 use crate::backing_fs::{BackingFs, DirEntry};
+use crate::vcs::VcsBackend;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -37,9 +38,6 @@ const TTL: Duration = Duration::from_secs(1);
 
 /// FUSE always uses inode 1 for the root directory.
 const FUSE_ROOT_ID: u64 = 1;
-
-/// Well-known VCS directory names to detect.
-const VCS_DIR_NAMES: &[&str] = &[".git", ".pijul", ".jj"];
 
 // ---------------------------------------------------------------------------
 // InodeMap
@@ -112,8 +110,8 @@ pub struct FdPassthroughFS<B: BackingFs> {
     /// When `true`, all mutating operations return `EROFS`.
     read_only: bool,
 
-    /// VCS directories detected at the backing root (e.g. `.git`, `.pijul`).
-    vcs_dirs: Vec<OsString>,
+    /// VCS backends detected at the backing root.
+    vcs_backends: Vec<Box<dyn VcsBackend>>,
 
     /// The mount point path (informational only — never used for I/O).
     mount_point: PathBuf,
@@ -122,9 +120,8 @@ pub struct FdPassthroughFS<B: BackingFs> {
 impl<B: BackingFs> FdPassthroughFS<B> {
     /// Create a new fd-based passthrough filesystem.
     ///
-    /// The constructor scans the backing root for well-known VCS directories
-    /// (`.git`, `.pijul`, `.jj`) so that callers can query them later via
-    /// [`is_vcs_path`](Self::is_vcs_path).
+    /// The constructor detects VCS systems present in the backing root
+    /// using the VcsBackend trait system.
     ///
     /// # Arguments
     ///
@@ -133,16 +130,35 @@ impl<B: BackingFs> FdPassthroughFS<B> {
     /// * `mount_point` — Where the FUSE filesystem will be mounted.  Used
     ///   only for logging and informational purposes.
     pub fn new(backing: B, mount_point: PathBuf) -> Self {
+        Self::with_vcs_backends(backing, mount_point, None)
+    }
+
+    /// Create a new fd-based passthrough filesystem with specific VCS backends.
+    ///
+    /// If `vcs_backends` is `None`, VCS detection is performed automatically.
+    /// If provided, the given backends are used instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `backing` — The [`BackingFs`] implementation
+    /// * `mount_point` — Where the FUSE filesystem will be mounted
+    /// * `vcs_backends` — Optional pre-detected VCS backends
+    pub fn with_vcs_backends(
+        backing: B,
+        mount_point: PathBuf,
+        vcs_backends: Option<Vec<Box<dyn VcsBackend>>>,
+    ) -> Self {
         let mut inode_to_path = HashMap::new();
         // FUSE root inode always maps to the empty relative path.
         inode_to_path.insert(FUSE_ROOT_ID, PathBuf::new());
 
-        // Detect VCS directories at the backing root.
-        let vcs_dirs = Self::detect_vcs_dirs(&backing);
+        // Detect VCS backends or use provided ones.
+        let vcs_backends = vcs_backends.unwrap_or_else(|| Self::detect_vcs_backends(&backing));
 
+        let vcs_names: Vec<&str> = vcs_backends.iter().map(|b| b.name()).collect();
         info!(
-            "FdPassthroughFS created — mount_point={:?}, detected VCS dirs: {:?}",
-            mount_point, vcs_dirs
+            "FdPassthroughFS created — mount_point={:?}, detected VCS backends: {:?}",
+            mount_point, vcs_names
         );
 
         Self {
@@ -151,44 +167,67 @@ impl<B: BackingFs> FdPassthroughFS<B> {
             next_fh: AtomicU64::new(1),
             open_files: RwLock::new(HashMap::new()),
             read_only: false,
-            vcs_dirs,
+            vcs_backends,
             mount_point,
         }
     }
 
-    /// Detect VCS directories at the backing root.
-    fn detect_vcs_dirs(backing: &B) -> Vec<OsString> {
-        let mut found = Vec::new();
+    /// Detect VCS backends at the backing root.
+    ///
+    /// This requires converting the backing root to an absolute path for VCS detection.
+    fn detect_vcs_backends(backing: &B) -> Vec<Box<dyn VcsBackend>> {
+        // For VCS detection, we need an actual filesystem path.
+        // Since BackingFs doesn't expose the base path directly, we use a workaround:
+        // try to read the backing root and check for VCS directories manually.
+
+        use crate::vcs::{GitBackend, JujutsuBackend, PijulBackend};
+
+        let mut backends: Vec<Box<dyn VcsBackend>> = Vec::new();
+
         if let Ok(entries) = backing.readdir(Path::new("")) {
-            for entry in &entries {
-                for &vcs_name in VCS_DIR_NAMES {
-                    if entry.name == vcs_name && entry.dtype == libc::DT_DIR {
-                        found.push(entry.name.clone());
-                    }
-                }
+            let vcs_dirs: Vec<&str> = entries
+                .iter()
+                .filter(|e| e.dtype == libc::DT_DIR)
+                .filter_map(|e| e.name.to_str())
+                .collect();
+
+            // Check each VCS backend
+            if vcs_dirs.contains(&".git") {
+                backends.push(Box::new(GitBackend));
+            }
+            if vcs_dirs.contains(&".jj") {
+                backends.push(Box::new(JujutsuBackend));
+            }
+            if vcs_dirs.contains(&".pijul") {
+                backends.push(Box::new(PijulBackend));
             }
         }
-        found
+
+        backends
     }
 
     // -- Public accessors ---------------------------------------------------
 
     /// Check whether `rel_path` is inside a VCS directory.
     ///
-    /// Returns `true` if the first component of `rel_path` matches one of the
-    /// detected VCS directories.
+    /// Returns `true` if any VCS backend should ignore this path.
     pub fn is_vcs_path(&self, rel_path: &Path) -> bool {
-        if let Some(first) = rel_path.components().next() {
-            let first_os: &OsStr = first.as_os_str();
-            self.vcs_dirs.iter().any(|v| v == first_os)
-        } else {
-            false
-        }
+        self.vcs_backends
+            .iter()
+            .any(|backend| backend.should_ignore(rel_path))
     }
 
-    /// Return the VCS directories detected at the backing root.
-    pub fn detected_vcs(&self) -> &[OsString] {
-        &self.vcs_dirs
+    /// Return the VCS backends detected at the backing root.
+    pub fn detected_vcs_backends(&self) -> &[Box<dyn VcsBackend>] {
+        &self.vcs_backends
+    }
+
+    /// Return the names of detected VCS systems.
+    pub fn detected_vcs(&self) -> Vec<String> {
+        self.vcs_backends
+            .iter()
+            .map(|b| b.vcs_dir_name().to_string())
+            .collect()
     }
 
     /// Get a clone of the [`InodeMap`] for sharing with observers.
@@ -1168,7 +1207,11 @@ mod tests {
 
         let (_hold, fs) = make_fs(tmp.path());
 
-        assert_eq!(fs.detected_vcs().len(), 2);
+        let detected = fs.detected_vcs();
+        assert_eq!(detected.len(), 2);
+        assert!(detected.contains(&".git".to_string()));
+        assert!(detected.contains(&".pijul".to_string()));
+
         assert!(fs.is_vcs_path(Path::new(".git")));
         assert!(fs.is_vcs_path(Path::new(".git/objects")));
         assert!(fs.is_vcs_path(Path::new(".pijul/config")));
@@ -1286,7 +1329,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (_hold, fs) = make_fs(tmp.path());
 
-        assert!(fs.detected_vcs().is_empty());
+        assert_eq!(fs.detected_vcs().len(), 0);
         assert!(!fs.is_vcs_path(Path::new(".git")));
     }
 
@@ -1297,7 +1340,10 @@ mod tests {
 
         let (_hold, fs) = make_fs(tmp.path());
 
-        assert_eq!(fs.detected_vcs().len(), 1);
+        let detected = fs.detected_vcs();
+        assert_eq!(detected.len(), 1);
+        assert!(detected.contains(&".jj".to_string()));
+
         assert!(fs.is_vcs_path(Path::new(".jj")));
         assert!(fs.is_vcs_path(Path::new(".jj/repo")));
     }
