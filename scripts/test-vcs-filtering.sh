@@ -50,9 +50,14 @@ cleanup() {
     fi
 
     # Remove test directory
-    if [ -d "${TEST_DIR:-}" ]; then
-        log "Removing test directory: $TEST_DIR"
-        rm -rf "$TEST_DIR"
+    # if [ -d "${TEST_DIR:-}" ]; then
+    #     log "Removing test directory: $TEST_DIR"
+    #     rm -rf "$TEST_DIR"
+    # fi
+
+    # Remove mount log if it exists
+    if [ -f "$PROJECT_ROOT/tmp/mount.log" ]; then
+        rm -f "$PROJECT_ROOT/tmp/mount.log"
     fi
 }
 
@@ -78,8 +83,9 @@ fi
 log "Starting VCS filtering integration test"
 log "Binary: $BINARY"
 
-# Create temporary test directory
-TEST_DIR=$(mktemp -d -t ize-vcs-test-XXXXXX)
+# Create temporary test directory in project tmp/
+mkdir -p "$PROJECT_ROOT/tmp"
+TEST_DIR=$(mktemp -d "$PROJECT_ROOT/tmp/ize-vcs-test-XXXXXX")
 log "Created test directory: $TEST_DIR"
 
 # Initialize git repository BEFORE mounting
@@ -93,7 +99,7 @@ log "✓ Git repository initialized"
 
 # Start ize_mount_fd in background
 log "Starting ize_mount_fd..."
-"$BINARY" "$TEST_DIR" --log-level info > "$TEST_DIR/../mount.log" 2>&1 &
+"$BINARY" "$TEST_DIR" --log-level info > "$PROJECT_ROOT/tmp/mount.log" 2>&1 &
 MOUNT_PID=$!
 log "Mount process started (PID: $MOUNT_PID)"
 
@@ -103,20 +109,20 @@ sleep 2
 # Verify mount is active
 if ! kill -0 "$MOUNT_PID" 2>/dev/null; then
     error "Mount process died unexpectedly"
-    cat "$TEST_DIR/../mount.log"
+    cat "$PROJECT_ROOT/tmp/mount.log"
     exit 1
 fi
 
 if ! mountpoint -q "$TEST_DIR"; then
     error "Directory is not mounted"
-    cat "$TEST_DIR/../mount.log"
+    cat "$PROJECT_ROOT/tmp/mount.log"
     exit 1
 fi
 log "✓ FUSE mount active"
 
 # Check VCS detection in logs
-if grep -q "Detected VCS" "$TEST_DIR/../mount.log"; then
-    VCS_DETECTED=$(grep "Detected VCS" "$TEST_DIR/../mount.log" | tail -1)
+if grep -q "Detected VCS" "$PROJECT_ROOT/tmp/mount.log"; then
+    VCS_DETECTED=$(grep "Detected VCS" "$PROJECT_ROOT/tmp/mount.log" | tail -1)
     log "✓ VCS detected: $VCS_DETECTED"
 else
     warn "VCS detection not found in logs"
