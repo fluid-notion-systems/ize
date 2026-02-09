@@ -53,12 +53,13 @@ struct Cli {
     #[arg(long)]
     dump: bool,
 
-    /// Ignore VCS directories (.git, .jj, .pijul) when dumping operations
+    /// Include VCS directories (.git, .jj, .pijul) when dumping operations
     ///
-    /// Only applies when --dump is enabled. Filters out operations on VCS
-    /// directories to match production behavior.
+    /// Only applies when --dump is enabled. By default, VCS operations are
+    /// filtered out to match production behavior. Use this flag to observe
+    /// VCS internals for debugging.
     #[arg(long, requires = "dump")]
-    ignore_vcs: bool,
+    include_vcs: bool,
 }
 
 fn main() -> Result<()> {
@@ -154,8 +155,10 @@ fn main() -> Result<()> {
     }
     if cli.dump {
         println!("  Logging opcodes to tmp/dump.log");
-        if cli.ignore_vcs {
-            println!("  VCS filtering enabled");
+        if cli.include_vcs {
+            println!("  Including VCS operations (debug mode)");
+        } else {
+            println!("  VCS filtering enabled (production mode)");
         }
     }
     println!("  Press Ctrl+C to unmount");
@@ -178,8 +181,8 @@ fn main() -> Result<()> {
         let mut observing_fs = ObservingFS::new(fs);
         observing_fs.add_observer(Arc::new(recorder));
 
-        // Add VCS filtering backends if --ignore-vcs is specified
-        if cli.ignore_vcs {
+        // Add VCS filtering backends unless --include-vcs is specified
+        if !cli.include_vcs {
             let vcs_backends: Vec<Box<dyn ize_lib::vcs::VcsBackend>> = vec![
                 Box::new(GitBackend),
                 Box::new(JujutsuBackend),
