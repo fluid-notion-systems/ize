@@ -1,0 +1,174 @@
+//! ize-mount-fd — fd-based FUSE passthrough mount
+//!
+//! Mounts a FUSE passthrough filesystem backed by a pre-opened directory fd.
+//! All underlying I/O goes through `LibcBackingFs` + `FdPassthroughFS` from
+//! the library — no inline syscall wrappers.
+//!
+//! The directory fd is opened **before** the FUSE mount is established, so
+//! `*at()` syscalls resolve against the underlying filesystem's inode and
+//! never re-enter FUSE.
+//!
+//! Usage:
+//!   ize_mount_fd <DIRECTORY>
+//!   ize_mount_fd <DIRECTORY> --read-only
+//!   ize_mount_fd <DIRECTORY> --log-level debug
+//!
+//! Press Ctrl+C to unmount and exit.
+
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use env_logger::Env;
+use fuser::MountOption;
+use ize_lib::backing_fs::LibcBackingFs;
+use ize_lib::filesystems::FdPassthroughFS;
+use log::{error, info};
+
+/// Mount a directory with an fd-based FUSE passthrough filesystem.
+#[derive(Parser, Debug)]
+#[command(name = "ize-mount-fd", version, about)]
+struct Cli {
+    /// Directory to mount over (will be both mount point and backing store)
+    #[arg(value_name = "DIRECTORY")]
+    directory: PathBuf,
+
+    /// Mount in read-only mode
+    #[arg(long)]
+    read_only: bool,
+
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(long, value_name = "LEVEL", default_value = "info")]
+    log_level: String,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    env_logger::Builder::from_env(Env::default().filter_or("RUST_LOG", &cli.log_level))
+        .format_timestamp_millis()
+        .init();
+
+    // Canonicalize the target directory.
+    let target_dir = std::fs::canonicalize(&cli.directory)
+        .with_context(|| format!("Failed to canonicalize path: {:?}", cli.directory))?;
+
+    if !target_dir.is_dir() {
+        anyhow::bail!("Not a directory: {:?}", target_dir);
+    }
+
+    info!("Target directory: {:?}", target_dir);
+
+    // ------------------------------------------------------------------
+    // 1. Open the directory fd BEFORE mounting — this is the critical step
+    // ------------------------------------------------------------------
+
+    let dir_cpath = CString::new(target_dir.as_os_str().as_bytes())
+        .context("directory path contains interior nul byte")?;
+
+    let base_fd = unsafe {
+        libc::open(
+            dir_cpath.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if base_fd < 0 {
+        anyhow::bail!(
+            "Failed to open base directory fd: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    info!(
+        "Opened base directory fd={} for {:?} (BEFORE mount)",
+        base_fd, target_dir
+    );
+
+    // ------------------------------------------------------------------
+    // 2. Create BackingFs + FdPassthroughFS from library types
+    // ------------------------------------------------------------------
+
+    let backing = LibcBackingFs::new(base_fd);
+    let mut fs = FdPassthroughFS::new(Box::new(backing), target_dir.clone());
+
+    if cli.read_only {
+        fs.set_read_only(true);
+    }
+
+    let vcs = fs.detected_vcs();
+    if !vcs.is_empty() {
+        info!("Detected VCS directories: {:?}", vcs);
+    }
+
+    // ------------------------------------------------------------------
+    // 3. Set up signal handler for clean unmount
+    // ------------------------------------------------------------------
+
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    ctrlc::set_handler(move || {
+        info!("Received interrupt, shutting down...");
+        r.store(false, Ordering::SeqCst);
+
+        // fusermount -u to cleanly unmount
+        let status = std::process::Command::new("fusermount")
+            .arg("-u")
+            .arg(&target_dir)
+            .status();
+        match status {
+            Ok(s) if s.success() => info!("Unmounted successfully"),
+            Ok(s) => error!("fusermount exited with: {}", s),
+            Err(e) => error!("Failed to run fusermount: {}", e),
+        }
+        std::process::exit(0);
+    })
+    .context("Failed to set signal handler")?;
+
+    // ------------------------------------------------------------------
+    // 4. Mount
+    // ------------------------------------------------------------------
+
+    let mount_point = cli.directory.clone();
+    let mount_display = mount_point.display().to_string();
+
+    let mut options = vec![
+        MountOption::FSName("ize-mount-fd".to_string()),
+        MountOption::DefaultPermissions,
+    ];
+    if cli.read_only {
+        options.push(MountOption::RO);
+    }
+
+    println!("✓ Mounting '{}' with ize-mount-fd", mount_display);
+    if cli.read_only {
+        println!("  Mode: read-only");
+    }
+    println!("  Press Ctrl+C to unmount");
+    println!();
+
+    info!(
+        "Mounting FUSE on {:?} (base_fd={} opened before mount — *at() calls bypass FUSE)",
+        mount_point, base_fd
+    );
+
+    // mount2 blocks until the filesystem is unmounted.
+    if let Err(e) = fuser::mount2(fs, &mount_point, &options) {
+        // Close the base fd on failure.
+        unsafe { libc::close(base_fd) };
+        anyhow::bail!("FUSE mount failed: {}\n\nHints:\n  • You may need to run as root\n  • Add 'user_allow_other' to /etc/fuse.conf\n  • Ensure 'fuse' kernel module is loaded (modprobe fuse)", e);
+    }
+
+    // ------------------------------------------------------------------
+    // 5. Cleanup (reached after unmount)
+    // ------------------------------------------------------------------
+
+    unsafe { libc::close(base_fd) };
+    info!("Closed base_fd={}", base_fd);
+    println!("✓ Unmounted '{}'", mount_display);
+
+    Ok(())
+}
