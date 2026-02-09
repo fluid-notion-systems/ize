@@ -45,17 +45,17 @@ The `ize-mount-fd` binary provides an fd-based FUSE passthrough filesystem that 
 
 ```bash
 # Build the binary
-cargo build --release --bin ize-mount-fd
+cargo build --release --bin ize_mount_fd
 
 # Mount a directory with fd-based passthrough
 # The directory is both the mount point and backing store
-./target/release/ize-mount-fd /path/to/directory
+./target/release/ize_mount_fd /path/to/directory
 
 # Mount in read-only mode
-./target/release/ize-mount-fd /path/to/directory --read-only
+./target/release/ize_mount_fd /path/to/directory --read-only
 
 # Enable debug logging
-./target/release/ize-mount-fd /path/to/directory --log-level debug
+./target/release/ize_mount_fd /path/to/directory --log-level debug
 
 # Press Ctrl+C to unmount and exit
 ```
