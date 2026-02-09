@@ -6,12 +6,15 @@
 //! - [`opcode`]: Core `Opcode` and `Operation` types
 //! - [`queue`]: Thread-safe `OpcodeQueue` for buffering operations
 //! - [`recorder`]: `OpcodeRecorder` that implements `FsObserver`
+//! - [`dump_observer`]: `DumpObserver` for `--dump` debug logging
 
+pub mod dump_observer;
 pub mod opcode;
 pub mod queue;
 pub mod recorder;
 
 // Re-export key types for convenience
+pub use dump_observer::DumpObserver;
 pub use opcode::{Opcode, Operation};
 pub use queue::{OpcodeQueue, OpcodeSender};
 pub use recorder::OpcodeRecorder;

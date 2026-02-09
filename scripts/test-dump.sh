@@ -157,7 +157,8 @@ log "Test 2: Modifying file..."
 echo "more content" >> "$TEST_DIR/test.txt"
 sleep 1
 
-WRITE_COUNT=$(grep -c "FileWrite" "$DUMP_LOG" 2>/dev/null || echo 0)
+WRITE_COUNT=$(grep -c "FileWrite" "$DUMP_LOG" || true)
+WRITE_COUNT=${WRITE_COUNT:-0}
 if [ "$WRITE_COUNT" -lt 2 ]; then
     warn "Expected at least 2 FileWrite opcodes, got $WRITE_COUNT"
 else
@@ -186,7 +187,8 @@ sleep 1
 AFTER_GIT_LINES=$(wc -l < "$DUMP_LOG")
 log "  After git add: $AFTER_GIT_LINES lines"
 
-GIT_PATH_COUNT=$(grep -c '\.git' "$DUMP_LOG" 2>/dev/null || echo 0)
+GIT_PATH_COUNT=$(grep -c '\.git' "$DUMP_LOG" || true)
+GIT_PATH_COUNT=${GIT_PATH_COUNT:-0}
 if [ "$GIT_PATH_COUNT" -gt 0 ]; then
     error ".git paths found in dump ($GIT_PATH_COUNT occurrences) — IgnoreFilter not working"
     grep '\.git' "$DUMP_LOG"
@@ -228,13 +230,13 @@ fi
 log ""
 log "Dump log summary:"
 log "  Total lines: $(wc -l < "$DUMP_LOG")"
-FC=$(grep -c 'FileCreate' "$DUMP_LOG" 2>/dev/null || echo 0)
-FW=$(grep -c 'FileWrite' "$DUMP_LOG" 2>/dev/null || echo 0)
-FD=$(grep -c 'FileDelete' "$DUMP_LOG" 2>/dev/null || echo 0)
-FR=$(grep -c 'FileRename' "$DUMP_LOG" 2>/dev/null || echo 0)
-DC=$(grep -c 'DirCreate' "$DUMP_LOG" 2>/dev/null || echo 0)
-DD=$(grep -c 'DirDelete' "$DUMP_LOG" 2>/dev/null || echo 0)
-GIT_PATHS=$(grep -c '\.git' "$DUMP_LOG" 2>/dev/null || echo 0)
+FC=$(grep -c 'FileCreate' "$DUMP_LOG" || true)
+FW=$(grep -c 'FileWrite' "$DUMP_LOG" || true)
+FD=$(grep -c 'FileDelete' "$DUMP_LOG" || true)
+FR=$(grep -c 'FileRename' "$DUMP_LOG" || true)
+DC=$(grep -c 'DirCreate' "$DUMP_LOG" || true)
+DD=$(grep -c 'DirDelete' "$DUMP_LOG" || true)
+GIT_PATHS=$(grep -c '\.git' "$DUMP_LOG" || true)
 log "  FileCreate:  $FC"
 log "  FileWrite:   $FW"
 log "  FileDelete:  $FD"
