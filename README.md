@@ -39,10 +39,40 @@ ize mount /path/to/directory /mount/point
 fusermount -u /mount/point
 ```
 
+### Advanced: fd-based Passthrough Mount
+
+The `ize-mount-fd` binary provides an fd-based FUSE passthrough filesystem that eliminates re-entry deadlocks by opening the directory file descriptor before mounting:
+
+```bash
+# Build the binary
+cargo build --release --bin ize-mount-fd
+
+# Mount a directory with fd-based passthrough
+# The directory is both the mount point and backing store
+./target/release/ize-mount-fd /path/to/directory
+
+# Mount in read-only mode
+./target/release/ize-mount-fd /path/to/directory --read-only
+
+# Enable debug logging
+./target/release/ize-mount-fd /path/to/directory --log-level debug
+
+# Press Ctrl+C to unmount and exit
+```
+
+**Features:**
+- **No re-entry deadlock**: Directory fd opened before FUSE mount
+- **VCS detection**: Automatically detects `.git`, `.jj`, `.pijul` directories
+- **Clean signal handling**: Ctrl+C gracefully unmounts
+- **Backing filesystem trait**: Uses `BackingFs` abstraction with `*at()` syscalls
+
+This is useful for development and testing of the core passthrough layer without the full versioning system.
+
 ## Documentation
 
 - **[Architecture](architecture.md)** - System design, components, and roadmap
 - **[Research](research/)** - Design documents and analysis
+- **[VCS Filtering](crates/ize-lib/src/vcs/README.md)** - VCS backend system documentation
 - **[Contributing](CONTRIBUTING.md)** - Development guidelines
 
 ## Status
