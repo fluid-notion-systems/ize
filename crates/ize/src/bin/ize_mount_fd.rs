@@ -157,27 +157,12 @@ fn main() -> Result<()> {
         mount_point
     );
 
+    // Always wrap in ObservingFS — zero observers means zero overhead.
+    let mut observing_fs = ObservingFS::new(fs);
+
     if cli.dump {
-        // ------------------------------------------------------------------
-        // Dump mode: wrap with ObservingFS and attach a DumpObserver that
-        // writes directly to the log file — no queue or consumer thread.
-        // ------------------------------------------------------------------
-
-        let inode_map = fs.inode_map();
-
-        // Build ignore filters from detected VCS directories
-        let ignore_filters: Vec<Box<dyn IgnoreFilter>> = {
-            let mut filters: Vec<Box<dyn IgnoreFilter>> = Vec::new();
-            for name in fs.detected_vcs() {
-                match name.as_str() {
-                    ".git" => filters.push(Box::new(GitBackend)),
-                    ".jj" => filters.push(Box::new(JujutsuBackend)),
-                    ".pijul" => filters.push(Box::new(PijulBackend)),
-                    _ => {}
-                }
-            }
-            filters
-        };
+        let inode_map = observing_fs.inner().inode_map();
+        let ignore_filters = build_ignore_filters(observing_fs.inner().detected_vcs());
 
         let filter_names: Vec<&str> = ignore_filters.iter().map(|f| f.name()).collect();
         info!("DumpObserver ignore filters: {:?}", filter_names);
@@ -187,34 +172,21 @@ fn main() -> Result<()> {
             .with_context(|| format!("Failed to open dump log: {}", dump_path.display()))?;
         let dump_observer = dump_observer.with_ignore_filters(ignore_filters);
 
-        let mut observing_fs = ObservingFS::new(fs);
         observing_fs.add_observer(Arc::new(dump_observer));
+    }
 
-        // Mount the observing filesystem
-        if let Err(e) = fuser::mount2(observing_fs, &mount_point, &options) {
-            anyhow::bail!(
-                "FUSE mount failed: {}\n\n\
-                 Hints:\n  \
-                 • You may need to run as root\n  \
-                 • Add 'user_allow_other' to /etc/fuse.conf\n  \
-                 • Ensure 'fuse' kernel module is loaded (modprobe fuse)",
-                e
-            );
-        }
-    } else {
-        // mount2 blocks until the filesystem is unmounted.
-        // When it returns, `fs` is dropped, which drops `LibcBackingFs`,
-        // which closes the base_fd automatically.
-        if let Err(e) = fuser::mount2(fs, &mount_point, &options) {
-            anyhow::bail!(
-                "FUSE mount failed: {}\n\n\
-                 Hints:\n  \
-                 • You may need to run as root\n  \
-                 • Add 'user_allow_other' to /etc/fuse.conf\n  \
-                 • Ensure 'fuse' kernel module is loaded (modprobe fuse)",
-                e
-            );
-        }
+    // mount2 blocks until the filesystem is unmounted.
+    // When it returns, the backing FdPassthroughFS is dropped, which drops
+    // LibcBackingFs, which closes the base_fd automatically.
+    if let Err(e) = fuser::mount2(observing_fs, &mount_point, &options) {
+        anyhow::bail!(
+            "FUSE mount failed: {}\n\n\
+             Hints:\n  \
+             • You may need to run as root\n  \
+             • Add 'user_allow_other' to /etc/fuse.conf\n  \
+             • Ensure 'fuse' kernel module is loaded (modprobe fuse)",
+            e
+        );
     }
 
     // ------------------------------------------------------------------
@@ -225,4 +197,18 @@ fn main() -> Result<()> {
     println!("✓ Unmounted '{}'", mount_display);
 
     Ok(())
+}
+
+/// Build ignore filters from detected VCS directory names.
+fn build_ignore_filters(vcs_names: Vec<String>) -> Vec<Box<dyn IgnoreFilter>> {
+    let mut filters: Vec<Box<dyn IgnoreFilter>> = Vec::new();
+    for name in vcs_names {
+        match name.as_str() {
+            ".git" => filters.push(Box::new(GitBackend)),
+            ".jj" => filters.push(Box::new(JujutsuBackend)),
+            ".pijul" => filters.push(Box::new(PijulBackend)),
+            _ => {}
+        }
+    }
+    filters
 }
