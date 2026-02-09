@@ -32,7 +32,7 @@
 //! ```
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,6 +41,7 @@ use log::{debug, warn};
 use crate::filesystems::observing::FsObserver;
 use crate::filesystems::passthrough::InodeMap;
 use crate::operations::{Opcode, Operation};
+use crate::vcs::IgnoreFilter;
 
 use super::queue::OpcodeSender;
 
@@ -61,6 +62,9 @@ pub struct OpcodeRecorder {
 
     /// Queue sender for enqueuing opcodes
     sender: OpcodeSender,
+
+    /// Ignore filters — paths matching any filter are silently dropped.
+    ignore_filters: Vec<Box<dyn IgnoreFilter>>,
 }
 
 impl OpcodeRecorder {
@@ -76,7 +80,18 @@ impl OpcodeRecorder {
             source_dir,
             next_seq: AtomicU64::new(1),
             sender,
+            ignore_filters: Vec::new(),
         }
+    }
+
+    /// Set ignore filters for path-based filtering.
+    ///
+    /// Paths matching any filter will be silently dropped before recording.
+    /// This is the primary mechanism for excluding VCS directories (.git, .jj, .pijul)
+    /// and other managed paths from the opcode stream.
+    pub fn with_ignore_filters(mut self, filters: Vec<Box<dyn IgnoreFilter>>) -> Self {
+        self.ignore_filters = filters;
+        self
     }
 
     /// Generate the next sequence number.
@@ -103,6 +118,11 @@ impl OpcodeRecorder {
     /// Convert a relative path to the real (source) path.
     fn to_real(&self, rel_path: &PathBuf) -> PathBuf {
         self.source_dir.join(rel_path)
+    }
+
+    /// Check whether a path should be ignored (not recorded).
+    fn is_ignored(&self, path: &Path) -> bool {
+        self.ignore_filters.iter().any(|f| f.should_ignore(path))
     }
 
     /// Emit an opcode to the queue.
@@ -134,6 +154,10 @@ impl FsObserver for OpcodeRecorder {
             }
         };
 
+        if self.is_ignored(&path) {
+            debug!("OpcodeRecorder::on_write ignored path={:?}", path);
+            return;
+        }
         debug!("OpcodeRecorder::on_write resolved path={:?}", path);
         self.emit(Operation::FileWrite {
             path,
@@ -155,6 +179,10 @@ impl FsObserver for OpcodeRecorder {
             }
         };
 
+        if self.is_ignored(&path) {
+            debug!("OpcodeRecorder::on_create ignored path={:?}", path);
+            return;
+        }
         debug!("OpcodeRecorder::on_create resolved path={:?}", path);
         self.emit(Operation::FileCreate {
             path,
@@ -175,6 +203,11 @@ impl FsObserver for OpcodeRecorder {
                 return;
             }
         };
+
+        if self.is_ignored(&path) {
+            debug!("OpcodeRecorder::on_unlink ignored path={:?}", path);
+            return;
+        }
 
         // Check if it's a symlink (use symlink_metadata to not follow symlinks)
         let real_path = self.to_real(&path);
@@ -202,6 +235,11 @@ impl FsObserver for OpcodeRecorder {
             }
         };
 
+        if self.is_ignored(&path) {
+            debug!("OpcodeRecorder::on_mkdir ignored path={:?}", path);
+            return;
+        }
+
         self.emit(Operation::DirCreate { path, mode });
     }
 
@@ -213,6 +251,11 @@ impl FsObserver for OpcodeRecorder {
                 return;
             }
         };
+
+        if self.is_ignored(&path) {
+            debug!("OpcodeRecorder::on_rmdir ignored path={:?}", path);
+            return;
+        }
 
         self.emit(Operation::DirDelete { path });
     }
@@ -233,6 +276,15 @@ impl FsObserver for OpcodeRecorder {
                 return;
             }
         };
+
+        // Ignore if EITHER path is ignored (conservative — keeps VCS completely transparent)
+        if self.is_ignored(&old_path) || self.is_ignored(&new_path) {
+            debug!(
+                "OpcodeRecorder::on_rename ignored old={:?} new={:?}",
+                old_path, new_path
+            );
+            return;
+        }
 
         // Check if source is a directory
         let real_old = self.to_real(&old_path);
@@ -262,6 +314,11 @@ impl FsObserver for OpcodeRecorder {
                 return;
             }
         };
+
+        if self.is_ignored(&path) {
+            debug!("OpcodeRecorder::on_setattr ignored path={:?}", path);
+            return;
+        }
 
         // Emit separate opcodes for each attribute change
         if let Some(new_size) = size {
@@ -296,6 +353,11 @@ impl FsObserver for OpcodeRecorder {
             }
         };
 
+        if self.is_ignored(&path) {
+            debug!("OpcodeRecorder::on_symlink ignored path={:?}", path);
+            return;
+        }
+
         self.emit(Operation::SymlinkCreate {
             path,
             target: target.to_path_buf(),
@@ -319,6 +381,15 @@ impl FsObserver for OpcodeRecorder {
             }
         };
 
+        // Ignore if EITHER path is ignored (conservative)
+        if self.is_ignored(&existing_path) || self.is_ignored(&new_path) {
+            debug!(
+                "OpcodeRecorder::on_link ignored existing={:?} new={:?}",
+                existing_path, new_path
+            );
+            return;
+        }
+
         self.emit(Operation::HardLinkCreate {
             existing_path,
             new_path,
@@ -330,6 +401,7 @@ impl FsObserver for OpcodeRecorder {
 mod tests {
     use super::*;
     use crate::operations::OpcodeQueue;
+    use crate::vcs::GitBackend;
     use std::collections::HashMap;
     use std::sync::RwLock;
 
@@ -350,6 +422,31 @@ mod tests {
         let sender = queue.sender();
 
         let recorder = OpcodeRecorder::new(inode_map, source_dir, sender);
+
+        (recorder, queue)
+    }
+
+    fn setup_test_recorder_with_git_filter() -> (OpcodeRecorder, std::sync::Arc<OpcodeQueue>) {
+        let inode_map = std::sync::Arc::new(RwLock::new(HashMap::new()));
+
+        {
+            let mut map = inode_map.write().unwrap();
+            map.insert(1, PathBuf::from("")); // root
+            map.insert(2, PathBuf::from("file.txt"));
+            map.insert(3, PathBuf::from(".git"));
+            map.insert(4, PathBuf::from(".git/objects"));
+            map.insert(5, PathBuf::from(".git/index"));
+            map.insert(6, PathBuf::from("src"));
+            map.insert(7, PathBuf::from("src/main.rs"));
+        }
+
+        let source_dir = PathBuf::from("/tmp/test_source");
+        let queue = OpcodeQueue::new();
+        let sender = queue.sender();
+
+        let filters: Vec<Box<dyn IgnoreFilter>> = vec![Box::new(GitBackend)];
+        let recorder =
+            OpcodeRecorder::new(inode_map, source_dir, sender).with_ignore_filters(filters);
 
         (recorder, queue)
     }
@@ -555,5 +652,128 @@ mod tests {
             }
             _ => panic!("Expected FileCreate operation"),
         }
+    }
+
+    // =========================================================================
+    // IgnoreFilter tests
+    // =========================================================================
+
+    #[test]
+    fn test_filter_ignores_git_write() {
+        let (recorder, queue) = setup_test_recorder_with_git_filter();
+
+        // Write to .git/index — should be ignored
+        recorder.on_write(5, 1, 0, b"data");
+        assert!(queue.is_empty(), ".git write should be filtered");
+
+        // Write to regular file — should be recorded
+        recorder.on_write(2, 1, 0, b"data");
+        assert!(!queue.is_empty(), "regular write should be recorded");
+    }
+
+    #[test]
+    fn test_filter_ignores_git_create() {
+        let (recorder, queue) = setup_test_recorder_with_git_filter();
+
+        // Create inside .git — should be ignored
+        recorder.on_create(3, OsStr::new("new_object"), 0o644, None);
+        assert!(queue.is_empty(), ".git create should be filtered");
+
+        // Create in regular dir — should be recorded
+        recorder.on_create(6, OsStr::new("lib.rs"), 0o644, None);
+        assert!(!queue.is_empty(), "regular create should be recorded");
+    }
+
+    #[test]
+    fn test_filter_ignores_git_unlink() {
+        let (recorder, queue) = setup_test_recorder_with_git_filter();
+
+        recorder.on_unlink(3, OsStr::new("index.lock"));
+        assert!(queue.is_empty(), ".git unlink should be filtered");
+
+        recorder.on_unlink(1, OsStr::new("file.txt"));
+        assert!(!queue.is_empty(), "regular unlink should be recorded");
+    }
+
+    #[test]
+    fn test_filter_ignores_git_mkdir() {
+        let (recorder, queue) = setup_test_recorder_with_git_filter();
+
+        recorder.on_mkdir(3, OsStr::new("refs"), 0o755, None);
+        assert!(queue.is_empty(), ".git mkdir should be filtered");
+
+        recorder.on_mkdir(1, OsStr::new("src"), 0o755, None);
+        assert!(!queue.is_empty(), "regular mkdir should be recorded");
+    }
+
+    #[test]
+    fn test_filter_ignores_git_rmdir() {
+        let (recorder, queue) = setup_test_recorder_with_git_filter();
+
+        recorder.on_rmdir(3, OsStr::new("objects"));
+        assert!(queue.is_empty(), ".git rmdir should be filtered");
+
+        recorder.on_rmdir(1, OsStr::new("dir"));
+        assert!(!queue.is_empty(), "regular rmdir should be recorded");
+    }
+
+    #[test]
+    fn test_filter_ignores_git_rename_either_path() {
+        let (recorder, queue) = setup_test_recorder_with_git_filter();
+
+        // Rename within .git — ignored
+        recorder.on_rename(3, OsStr::new("old"), 3, OsStr::new("new"));
+        assert!(queue.is_empty(), ".git→.git rename should be filtered");
+
+        // Rename from .git to regular — ignored (conservative: EITHER path)
+        recorder.on_rename(3, OsStr::new("leaked"), 1, OsStr::new("leaked"));
+        assert!(queue.is_empty(), ".git→regular rename should be filtered");
+
+        // Rename from regular to .git — ignored
+        recorder.on_rename(1, OsStr::new("file.txt"), 3, OsStr::new("stashed"));
+        assert!(queue.is_empty(), "regular→.git rename should be filtered");
+
+        // Rename between regular dirs — recorded
+        recorder.on_rename(1, OsStr::new("file.txt"), 6, OsStr::new("moved.txt"));
+        assert!(
+            !queue.is_empty(),
+            "regular→regular rename should be recorded"
+        );
+    }
+
+    #[test]
+    fn test_filter_ignores_git_setattr() {
+        let (recorder, queue) = setup_test_recorder_with_git_filter();
+
+        // setattr on .git/index — ignored
+        recorder.on_setattr(5, Some(100), None, None, None);
+        assert!(queue.is_empty(), ".git setattr should be filtered");
+
+        // setattr on regular file — recorded
+        recorder.on_setattr(2, Some(100), None, None, None);
+        assert!(!queue.is_empty(), "regular setattr should be recorded");
+    }
+
+    #[test]
+    fn test_no_filters_records_everything() {
+        let (recorder, queue) = setup_test_recorder();
+
+        // Without filters, .git-like paths under "dir" inode are still recorded
+        // (the default setup doesn't have .git paths, but we can create under root)
+        recorder.on_create(1, OsStr::new(".git"), 0o755, None);
+        assert!(!queue.is_empty(), "without filters everything is recorded");
+    }
+
+    #[test]
+    fn test_with_ignore_filters_builder() {
+        let inode_map = std::sync::Arc::new(RwLock::new(HashMap::new()));
+        let queue = OpcodeQueue::new();
+        let sender = queue.sender();
+
+        let filters: Vec<Box<dyn IgnoreFilter>> = vec![Box::new(GitBackend)];
+        let recorder = OpcodeRecorder::new(inode_map, PathBuf::from("/tmp"), sender)
+            .with_ignore_filters(filters);
+
+        assert!(!recorder.ignore_filters.is_empty());
     }
 }

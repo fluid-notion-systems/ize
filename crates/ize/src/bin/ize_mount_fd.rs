@@ -30,6 +30,7 @@ use fuser::MountOption;
 use ize_lib::backing_fs::LibcBackingFs;
 use ize_lib::filesystems::{FdPassthroughFS, ObservingFS};
 use ize_lib::operations::{OpcodeQueue, OpcodeRecorder, Operation};
+use ize_lib::vcs::{GitBackend, IgnoreFilter, JujutsuBackend, PijulBackend};
 use log::{error, info, warn};
 
 /// Mount a directory with an fd-based FUSE passthrough filesystem.
@@ -167,7 +168,26 @@ fn main() -> Result<()> {
 
         let queue = OpcodeQueue::new();
         let inode_map = fs.inode_map();
-        let recorder = OpcodeRecorder::new(inode_map, target_dir.clone(), queue.sender());
+
+        // Build ignore filters from detected VCS directories
+        let ignore_filters: Vec<Box<dyn IgnoreFilter>> = {
+            let mut filters: Vec<Box<dyn IgnoreFilter>> = Vec::new();
+            for name in fs.detected_vcs() {
+                match name.as_str() {
+                    ".git" => filters.push(Box::new(GitBackend)),
+                    ".jj" => filters.push(Box::new(JujutsuBackend)),
+                    ".pijul" => filters.push(Box::new(PijulBackend)),
+                    _ => {}
+                }
+            }
+            filters
+        };
+
+        let filter_names: Vec<&str> = ignore_filters.iter().map(|f| f.name()).collect();
+        info!("OpcodeRecorder ignore filters: {:?}", filter_names);
+
+        let recorder = OpcodeRecorder::new(inode_map, target_dir.clone(), queue.sender())
+            .with_ignore_filters(ignore_filters);
 
         let mut observing_fs = ObservingFS::new(fs);
         observing_fs.add_observer(Arc::new(recorder));

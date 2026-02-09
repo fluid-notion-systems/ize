@@ -6,7 +6,7 @@ set -euo pipefail
 # Tests that:
 # 1. ize_mount_fd --dump records operations to tmp/dump.log
 # 2. Regular file operations are recorded
-# 3. Git operations are visible (VCS filtering removed from ObservingFS)
+# 3. VCS operations (.git) are filtered by OpcodeRecorder's IgnoreFilter
 # 4. Dump file is properly formatted and parseable
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -157,7 +157,7 @@ log "Test 2: Modifying file..."
 echo "more content" >> "$TEST_DIR/test.txt"
 sleep 1
 
-WRITE_COUNT=$(grep -c "FileWrite" "$DUMP_LOG" || true)
+WRITE_COUNT=$(grep -c "FileWrite" "$DUMP_LOG" 2>/dev/null || echo 0)
 if [ "$WRITE_COUNT" -lt 2 ]; then
     warn "Expected at least 2 FileWrite opcodes, got $WRITE_COUNT"
 else
@@ -176,7 +176,7 @@ else
     log "✓ Directory creation logged"
 fi
 
-# --- Test 4: Git add (should be visible — no VCS filtering in ObservingFS) ---
+# --- Test 4: Git add (.git operations should be filtered by OpcodeRecorder) ---
 
 BEFORE_GIT_LINES=$(wc -l < "$DUMP_LOG")
 log "Test 4: Running git add (dump has $BEFORE_GIT_LINES lines)..."
@@ -186,14 +186,13 @@ sleep 1
 AFTER_GIT_LINES=$(wc -l < "$DUMP_LOG")
 log "  After git add: $AFTER_GIT_LINES lines"
 
-if [ "$AFTER_GIT_LINES" -gt "$BEFORE_GIT_LINES" ]; then
-    log "✓ Git operations generated filesystem activity"
-    if grep -q "\.git" "$DUMP_LOG"; then
-        log "✓ .git paths visible in dump (VCS filtering is observer responsibility)"
-    fi
-else
-    warn "No new lines after git add — git may be using direct fd access"
+GIT_PATH_COUNT=$(grep -c '\.git' "$DUMP_LOG" 2>/dev/null || echo 0)
+if [ "$GIT_PATH_COUNT" -gt 0 ]; then
+    error ".git paths found in dump ($GIT_PATH_COUNT occurrences) — IgnoreFilter not working"
+    grep '\.git' "$DUMP_LOG"
+    exit 1
 fi
+log "✓ VCS operations filtered by OpcodeRecorder (0 .git paths in dump)"
 
 # NOTE: Skipping git commit — it hangs under FdPassthroughFS FUSE mount.
 # This is a known issue to investigate separately.
@@ -229,13 +228,24 @@ fi
 log ""
 log "Dump log summary:"
 log "  Total lines: $(wc -l < "$DUMP_LOG")"
-log "  FileCreate:  $(grep -c 'FileCreate' "$DUMP_LOG" || echo 0)"
-log "  FileWrite:   $(grep -c 'FileWrite' "$DUMP_LOG" || echo 0)"
-log "  FileDelete:  $(grep -c 'FileDelete' "$DUMP_LOG" || echo 0)"
-log "  FileRename:  $(grep -c 'FileRename' "$DUMP_LOG" || echo 0)"
-log "  DirCreate:   $(grep -c 'DirCreate' "$DUMP_LOG" || echo 0)"
-log "  DirDelete:   $(grep -c 'DirDelete' "$DUMP_LOG" || echo 0)"
-log "  .git paths:  $(grep -c '\.git' "$DUMP_LOG" || echo 0)"
+FC=$(grep -c 'FileCreate' "$DUMP_LOG" 2>/dev/null || echo 0)
+FW=$(grep -c 'FileWrite' "$DUMP_LOG" 2>/dev/null || echo 0)
+FD=$(grep -c 'FileDelete' "$DUMP_LOG" 2>/dev/null || echo 0)
+FR=$(grep -c 'FileRename' "$DUMP_LOG" 2>/dev/null || echo 0)
+DC=$(grep -c 'DirCreate' "$DUMP_LOG" 2>/dev/null || echo 0)
+DD=$(grep -c 'DirDelete' "$DUMP_LOG" 2>/dev/null || echo 0)
+GIT_PATHS=$(grep -c '\.git' "$DUMP_LOG" 2>/dev/null || echo 0)
+log "  FileCreate:  $FC"
+log "  FileWrite:   $FW"
+log "  FileDelete:  $FD"
+log "  FileRename:  $FR"
+log "  DirCreate:   $DC"
+log "  DirDelete:   $DD"
+log "  .git paths:  $GIT_PATHS (should be 0)"
+if [ "$GIT_PATHS" -ne 0 ]; then
+    error "Expected 0 .git paths but found $GIT_PATHS — IgnoreFilter broken"
+    exit 1
+fi
 
 # Unmount
 log ""
@@ -268,7 +278,7 @@ echo ""
 log "Results:"
 log "  - --dump creates tmp/dump.log: ✓"
 log "  - Regular file operations logged: ✓"
-log "  - Git operations visible (no ObservingFS filtering): ✓"
+log "  - VCS operations filtered (IgnoreFilter in OpcodeRecorder): ✓"
 echo ""
 log "Test directory preserved at: $TEST_DIR"
 log "Dump log at: $DUMP_LOG"
