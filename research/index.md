@@ -22,7 +22,10 @@ This directory contains research and analysis for the Ize project, organized by 
 - **[Pijul Storage Architecture Analysis](pijul_storage_analysis.md)** - How Pijul solves version control storage
 - **[Salsa Incremental Computation](salsa_incremental_computation.md)** - Lessons from rust-analyzer's approach
 
-### Phase 5: Advanced Storage Implementation
+### Phase 5: Jujutsu Integration
+- **[Ize → jj Opcode Export](../vendor/jj/opcodes-export.md)** - Importing ize opcodes into jj's op log, bypassing working-copy snapshot
+
+### Phase 6: Advanced Storage Implementation
 - **[Custom Storage Engine Design](custom_storage_design.md)** - Pure Rust implementation possibilities
 - **[Copy-on-Write Strategies](cow_strategies.md)** - Efficient file versioning approaches
 - **[Delta Compression Techniques](delta_compression.md)** - Minimizing storage overhead
@@ -43,6 +46,9 @@ This directory contains research and analysis for the Ize project, organized by 
 - Async Processing Pipeline
 - Salsa Incremental Computation
 
+### VCS Integration
+- Ize → jj Opcode Export
+
 ### Storage & Persistence
 - Rust Persistence Engines Comparison
 - Pijul Storage Architecture Analysis
@@ -56,10 +62,12 @@ This directory contains research and analysis for the Ize project, organized by 
 2. **Short-term (Week 3-4)**: Establish benchmarking baselines and performance metrics
 3. **Near-term (Month 2)**: Refactor Command → Op queue system
 4. **Medium-term (Month 2-3)**: Evaluate and integrate Pijul storage components
-5. **Long-term (Month 3+)**: Custom pure-Rust persistence layer
+5. **Medium-term (Month 3)**: Ize → jj opcode integration (targeted snapshot, then direct op injection)
+6. **Long-term (Month 3+)**: Custom pure-Rust persistence layer
 
 ## Dependencies & Integration Points
 
+- **Jujutsu Integration**: Feed ize opcodes into jj's op log via targeted snapshot or direct tree injection
 - **Pijul Integration**: Potential for reusing `libpijul` and `sanakirja` components
 - **SeaORM Migration**: Plan for moving away from Diesel to SeaORM
 - **FUSE Layer**: Maintain clean separation between storage and filesystem operations
